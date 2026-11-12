@@ -1,0 +1,23 @@
+{
+  "name": "mandate",
+  "private": true,
+  "type": "module",
+  "packageManager": "pnpm@12.18.0",
+  "engines": { "node": ">=24" },
+  "scripts": {
+    "typecheck": "pnpm -r typecheck",
+    "setup:testnet": "node scripts/setup-testnet.ts",
+    "dev:merchant": "pnpm --filter @mandate/merchant dev",
+    "dev:facilitator": "pnpm --filter @mandate/facilitator dev",
+    "dev:receipts": "pnpm --filter @mandate/receipts dev",
+    "dev:web": "pnpm --filter @mandate/web dev",
+    "agent": "pnpm --filter @mandate/agent start"
+  },
+  "dependencies": {
+    "@stellar/stellar-sdk": "^16.4.1"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}
