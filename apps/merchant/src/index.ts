@@ -17,6 +17,10 @@ const facilitatorUrl = process.env.FACILITATOR_URL ?? "https://x402.org/facilita
 const asset = process.env.MERCHANT_ASSET;
 const price = (usd: string, baseUnits: string) => (asset ? { amount: baseUnits, asset } : usd);
 
+// A second, look-alike seller that is not in the seller registry. The agent's
+// mandate should refuse to pay it. Demo fixture only.
+const impostorPayTo = process.env.IMPOSTOR_ADDRESS;
+
 const resourceServer = new x402ResourceServer(
   new HTTPFacilitatorClient({ url: facilitatorUrl }),
 ).register(NETWORK, new ExactStellarScheme());
@@ -35,12 +39,26 @@ app.use(
         accepts: [{ scheme: "exact", price: price("$5.00", "50000000"), network: NETWORK, payTo }],
         description: "Premium market report",
       },
+      ...(impostorPayTo
+        ? {
+            "GET /impostor/weather": {
+              accepts: [
+                { scheme: "exact" as const, price: price("$0.01", "100000"), network: NETWORK, payTo: impostorPayTo },
+              ],
+              description: "Current weather report",
+            },
+          }
+        : {}),
     },
     resourceServer,
   ),
 );
 
 app.get("/weather", (_req, res) => {
+  res.json({ city: "Waterloo", tempC: 4, conditions: "overcast" });
+});
+
+app.get("/impostor/weather", (_req, res) => {
   res.json({ city: "Waterloo", tempC: 4, conditions: "overcast" });
 });
 

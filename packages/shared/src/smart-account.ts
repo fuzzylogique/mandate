@@ -3,7 +3,16 @@
 // A classic Stellar account signs an auth entry with "public key + signature".
 // The smart account instead expects an `AuthPayload`: which signers signed,
 // and which context rule each auth context should be checked against.
-import { Address, buildAuthorizationEntryPreimage, hash, xdr, type Keypair } from "@stellar/stellar-sdk";
+import {
+  Address,
+  buildAuthorizationEntryPreimage,
+  contract,
+  hash,
+  nativeToScVal,
+  rpc,
+  xdr,
+  type Keypair,
+} from "@stellar/stellar-sdk";
 
 export interface SmartAccountSigner {
   /** The smart account (C-address) being authorized. */
@@ -66,7 +75,7 @@ export function signSmartAccountAuthEntry(
     throw new Error(`Auth entry is for ${authEntryAddress(entry)}, not ${signer.smartAccount}`);
   }
 
-  // The payload the Soroban host hands to __check_auth.
+  // The payload the Stellar smart contract host hands to __check_auth.
   const signaturePayload = hash(
     buildAuthorizationEntryPreimage(entry, expirationLedger, networkPassphrase).toXDR(),
   );
@@ -99,4 +108,121 @@ export function signSmartAccountAuthEntry(
 
   credentials.signatureExpirationLedger(expirationLedger);
   credentials.signature(authPayload);
+}
+
+export interface SmartAccountCall {
+  rpcUrl: string;
+  networkPassphrase: string;
+  /** Contract to call and the function on it. */
+  contractId: string;
+  method: string;
+  args: xdr.ScVal[];
+  /** Classic account that submits the transaction and pays the fee. */
+  feePayer: Keypair;
+  /** Who signs on behalf of the smart account, and under which rule. */
+  signer: SmartAccountSigner;
+  contextRuleId: number;
+}
+
+/**
+ * Calls a contract function that needs the smart account's authorization:
+ * simulate, sign the account's auth entry, simulate again, submit.
+ * Returns the transaction hash and the function's return value.
+ */
+export async function invokeAsSmartAccount(
+  call: SmartAccountCall,
+): Promise<{ txHash: string; result: xdr.ScVal }> {
+  const server = new rpc.Server(call.rpcUrl);
+  const tx = await contract.AssembledTransaction.build({
+    contractId: call.contractId,
+    method: call.method,
+    args: call.args,
+    networkPassphrase: call.networkPassphrase,
+    rpcUrl: call.rpcUrl,
+    publicKey: call.feePayer.publicKey(),
+    parseResultXdr: (result: xdr.ScVal) => result,
+  });
+
+  const operation = tx.built?.operations[0];
+  if (!operation || operation.type !== "invokeHostFunction") {
+    throw new Error("Expected a single invokeHostFunction operation");
+  }
+  const expirationLedger = (await server.getLatestLedger()).sequence + 60;
+  for (const entry of operation.auth ?? []) {
+    if (authEntryAddress(entry) === call.signer.smartAccount) {
+      signSmartAccountAuthEntry(
+        entry,
+        call.signer,
+        [call.contextRuleId],
+        expirationLedger,
+        call.networkPassphrase,
+      );
+    }
+  }
+
+  // Simulate again with the signature attached, so the footprint and fees
+  // cover what __check_auth, the verifier and the policies read and write.
+  await tx.simulate();
+
+  const { signTransaction } = contract.basicNodeSigner(call.feePayer, call.networkPassphrase);
+  const sent = await tx.signAndSend({ signTransaction, force: true });
+  const txHash = sent.sendTransactionResponse?.hash ?? "";
+  return { txHash, result: sent.result as xdr.ScVal };
+}
+
+export interface MandateParams {
+  /** Token the agent may spend (C-address). */
+  token: string;
+  /** Label stored on chain, at most 20 bytes. */
+  name: string;
+  /** Limit per period, in token base units. */
+  limitBaseUnits: bigint;
+  /** Length of the rolling window, in ledgers (about 5 seconds each). */
+  periodLedgers: number;
+  /** Ledger after which the mandate stops working; omit for no expiry. */
+  validUntilLedger?: number;
+  /** The agent's public key. */
+  agent: Keypair;
+  verifier: string;
+  spendingLimitPolicy: string;
+  verifiedSellerPolicy: string;
+  sellerRegistry: string;
+}
+
+/** Arguments for `add_context_rule` that create one agent mandate. */
+export function mandateArgs(params: MandateParams): xdr.ScVal[] {
+  const address = (id: string) => Address.fromString(id).toScVal();
+  const struct = (fields: Record<string, xdr.ScVal>) =>
+    xdr.ScVal.scvMap(
+      Object.keys(fields)
+        .sort()
+        .map((key) => mapEntry(key, fields[key]!)),
+    );
+
+  // Policy address -> install parameters. Map keys must be sorted by address.
+  const policies = [
+    {
+      id: params.spendingLimitPolicy,
+      params: struct({
+        spending_limit: nativeToScVal(params.limitBaseUnits, { type: "i128" }),
+        period_ledgers: xdr.ScVal.scvU32(params.periodLedgers),
+      }),
+    },
+    {
+      id: params.verifiedSellerPolicy,
+      params: struct({ registry: address(params.sellerRegistry) }),
+    },
+  ].sort((a, b) =>
+    Buffer.compare(Address.fromString(a.id).toBuffer(), Address.fromString(b.id).toBuffer()),
+  );
+
+  return [
+    xdr.ScVal.scvVec([symbol("CallContract"), address(params.token)]),
+    nativeToScVal(params.name, { type: "string" }),
+    params.validUntilLedger ? xdr.ScVal.scvU32(params.validUntilLedger) : xdr.ScVal.scvVoid(),
+    xdr.ScVal.scvVec([externalSigner(params.verifier, params.agent)]),
+    xdr.ScVal.scvMap(
+      policies.map((policy) => new xdr.ScMapEntry({ key: address(policy.id), val: policy.params })),
+    ),
+  ];
 }

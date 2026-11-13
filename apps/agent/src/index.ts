@@ -6,13 +6,9 @@
 //                             the agent's key under its context rule
 //
 // Usage: pnpm agent -- http://localhost:4021/weather
-import { Keypair } from "@stellar/stellar-sdk";
-import { decodePaymentResponseHeader, wrapFetchWithPaymentFromConfig } from "@x402/fetch";
-import { createEd25519Signer } from "@x402/stellar";
-import { ExactStellarScheme } from "@x402/stellar/exact/client";
-import { NETWORK, type ReceiptAnnotation } from "@mandate/shared";
+import type { ReceiptAnnotation } from "@mandate/shared";
 import { requireEnv } from "@mandate/shared/env";
-import { SmartAccountExactStellarScheme } from "./smart-account-scheme.ts";
+import { createPayingFetch, settlementTxHash, type Payer } from "./purchase.ts";
 
 const url = process.argv.slice(2).find((arg) => arg.startsWith("http"));
 if (!url) {
@@ -22,24 +18,17 @@ if (!url) {
 
 const mode = process.env.PAYER_MODE ?? "classic";
 const agentSecret = requireEnv("AGENT_SECRET");
-
-const scheme =
+const payer: Payer =
   mode === "smart-account"
-    ? new SmartAccountExactStellarScheme({
+    ? {
+        mode: "smart-account",
+        agentSecret,
         smartAccount: requireEnv("SMART_ACCOUNT_ID"),
         contextRuleId: Number(requireEnv("AGENT_CONTEXT_RULE_ID")),
         verifier: requireEnv("ED25519_VERIFIER_ID"),
-        agentKeypair: Keypair.fromSecret(agentSecret),
-      })
-    : new ExactStellarScheme(createEd25519Signer(agentSecret, NETWORK));
-
-// The x402 client only pays in USDC unless told otherwise. AGENT_EXTRA_ASSET
-// allows one more token (C-address), e.g. testnet XLM for testing.
-const extraAsset = process.env.AGENT_EXTRA_ASSET;
-const payingFetch = wrapFetchWithPaymentFromConfig(fetch, {
-  schemes: [{ network: "stellar:*", client: scheme }],
-  ...(extraAsset ? { spendControls: { allowedAssets: [{ network: NETWORK, asset: extraAsset }] } } : {}),
-});
+      }
+    : { mode: "classic", agentSecret };
+const payingFetch = createPayingFetch({ payer, extraAsset: process.env.AGENT_EXTRA_ASSET || undefined });
 
 console.log(`[agent] ${mode} payer requesting ${url}`);
 let response: Response;
@@ -55,19 +44,17 @@ try {
 console.log(`[agent] status ${response.status}`);
 console.log(await response.text());
 
-// The seller echoes settlement details (tx hash, payer) in a response header.
-const settlementHeader =
-  response.headers.get("PAYMENT-RESPONSE") ?? response.headers.get("X-PAYMENT-RESPONSE");
-if (settlementHeader) {
-  const settlement = decodePaymentResponseHeader(settlementHeader);
-  console.log("[agent] settlement", settlement);
+// The seller echoes the settled transaction in a response header.
+const txHash = settlementTxHash(response);
+if (txHash) {
+  console.log(`[agent] paid, transaction ${txHash}`);
 
   // Tell the receipt service what this payment was for. The chain only knows
   // who paid whom and how much.
   const receiptsUrl = process.env.RECEIPTS_URL;
-  if (receiptsUrl && settlement.transaction) {
+  if (receiptsUrl) {
     const annotation: ReceiptAnnotation = {
-      txHash: settlement.transaction,
+      txHash,
       resource: url,
       agentName: process.env.AGENT_NAME ?? "demo-agent",
       sellerDomain: new URL(url).host,

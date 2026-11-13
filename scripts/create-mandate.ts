@@ -8,8 +8,9 @@
 //
 // Defaults: testnet USDC, limit 1 (one whole token), period 17280 ledgers (~1 day).
 import { parseArgs } from "node:util";
-import { Address, Keypair, nativeToScVal, scValToNative, xdr } from "@stellar/stellar-sdk";
-import { externalSigner } from "../packages/shared/src/smart-account.ts";
+import { Keypair, scValToNative } from "@stellar/stellar-sdk";
+import { toBaseUnits } from "../packages/shared/src/index.ts";
+import { mandateArgs } from "../packages/shared/src/smart-account.ts";
 import { env, invokeAsSmartAccount } from "./lib.ts";
 
 const TESTNET_USDC = "CBIELTK6YBZJU5UP2WWQEUCYKLPU6AUNZ2BQ4WWFEIE3USCIHMXQDAMA";
@@ -30,48 +31,22 @@ const verifier = env("ED25519_VERIFIER_ID");
 const owner = Keypair.fromSecret(env("OWNER_SECRET"));
 const agent = Keypair.fromPublicKey(env("AGENT_ADDRESS"));
 
-const symbol = (name: string) => xdr.ScVal.scvSymbol(name);
-const address = (id: string) => Address.fromString(id).toScVal();
-const struct = (fields: Record<string, xdr.ScVal>) =>
-  xdr.ScVal.scvMap(
-    Object.keys(fields)
-      .sort()
-      .map((key) => new xdr.ScMapEntry({ key: symbol(key), val: fields[key]! })),
-  );
-
 // Tokens use 7 decimals: "1" -> 10_000_000 base units.
-const [whole = "0", fraction = ""] = values.limit.split(".");
-const limitBaseUnits = BigInt(whole) * 10_000_000n + BigInt(fraction.padEnd(7, "0").slice(0, 7));
-
-// Policy address -> install parameters. Map keys must be sorted by address.
-const policies = [
-  {
-    id: env("SPENDING_LIMIT_POLICY_ID"),
-    params: struct({
-      spending_limit: nativeToScVal(limitBaseUnits, { type: "i128" }),
-      period_ledgers: xdr.ScVal.scvU32(Number(values["period-ledgers"])),
-    }),
-  },
-  {
-    id: env("VERIFIED_SELLER_POLICY_ID"),
-    params: struct({ registry: address(env("SELLER_REGISTRY_ID")) }),
-  },
-].sort((a, b) =>
-  Buffer.compare(Address.fromString(a.id).toBuffer(), Address.fromString(b.id).toBuffer()),
-);
-
 const { txHash, result } = await invokeAsSmartAccount({
   contractId: smartAccount,
   method: "add_context_rule",
-  args: [
-    xdr.ScVal.scvVec([symbol("CallContract"), address(values.token)]),
-    nativeToScVal(values.name, { type: "string" }),
-    values["valid-until"] ? xdr.ScVal.scvU32(Number(values["valid-until"])) : xdr.ScVal.scvVoid(),
-    xdr.ScVal.scvVec([externalSigner(verifier, agent)]),
-    xdr.ScVal.scvMap(
-      policies.map((policy) => new xdr.ScMapEntry({ key: address(policy.id), val: policy.params })),
-    ),
-  ],
+  args: mandateArgs({
+    token: values.token,
+    name: values.name,
+    limitBaseUnits: BigInt(toBaseUnits(values.limit)),
+    periodLedgers: Number(values["period-ledgers"]),
+    validUntilLedger: values["valid-until"] ? Number(values["valid-until"]) : undefined,
+    agent,
+    verifier,
+    spendingLimitPolicy: env("SPENDING_LIMIT_POLICY_ID"),
+    verifiedSellerPolicy: env("VERIFIED_SELLER_POLICY_ID"),
+    sellerRegistry: env("SELLER_REGISTRY_ID"),
+  }),
   feePayer: owner,
   signer: { smartAccount, verifier, keypair: owner },
   contextRuleId: OWNER_RULE_ID,

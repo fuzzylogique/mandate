@@ -9,7 +9,12 @@
   "dependencies": {
     "@mandate/shared": "workspace:*",
     "@stellar/stellar-sdk": "^16.4.1",
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "@mandate/agent": "workspace:*"
   },
-  "devDependencies": { "@types/express": "^5.0.0", "@types/node": "^24.0.0", "typescript": "^5.9.0" }
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
 }

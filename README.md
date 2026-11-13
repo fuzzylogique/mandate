@@ -3,8 +3,8 @@
 Spending rules and receipts for AI agents, enforced on Stellar.
 
 An owner gives each agent a **mandate**: how much it may spend per period, which
-verified sellers it may pay, and until when. The rules live in Soroban contracts
-and are checked at payment time, so an over-limit payment or a payment to an
+verified sellers it may pay, and until when. The rules live in Stellar Smart
+Contracts and are checked at payment time, so an over-limit payment or a payment to an
 unverified seller fails on-chain no matter what the agent does. Every payment
 that goes through becomes a receipt: agent, owner, seller, amount, transaction.
 
@@ -39,8 +39,8 @@ those checks. Off-chain: what was bought, names, emails.
 | `apps/merchant` | Demo seller: a paid API behind x402. A fixture, not the product. |
 | `apps/agent` | Buyer agent: pays for a URL over x402, from its own account or from the smart account. |
 | `apps/facilitator` | Our own x402 facilitator. Needed for smart-account payments (see below). |
-| `apps/receipts` | Indexes payment events, stores receipts, serves them. |
-| `apps/web` | Owner dashboard listing receipts. |
+| `apps/receipts` | Dashboard API: indexes payments into receipts, reads balance and mandates from chain, creates and revokes mandates, runs demo purchases, records refusals. |
+| `apps/web` | Owner dashboard: balance, agents and their limits, activity with receipts and declined payments. |
 | `packages/shared` | Types shared by the TypeScript packages. |
 | `scripts/` | Testnet setup, contract deployment, mandate creation, funding, direct transfer test. |
 
@@ -57,8 +57,8 @@ payment token (the USDC faucet needs a captcha, so USDC itself is untested):
 | Agent pays an unverified recipient | Refused by the account's contracts. |
 | Agent exceeds its limit | Refused by the account's contracts, directly and through x402. |
 | Receipts | Each payment is indexed from chain into a receipt, with what was bought attached. |
-| Dashboard | Builds and lists receipts; not yet looked at in a browser with real data. |
-| Mandate management in the UI, owner sign-in, receipt email | Not started. |
+| Dashboard | Works against testnet (checked in a browser): create an agent with a limit, send it to buy, see the receipt or the declined payment and why, revoke an agent. |
+| Owner sign-in, receipt email | Not started. |
 | Seller verification against `stellar.toml` | Not started; sellers are registered by hand. |
 
 ### Deployed on testnet
@@ -108,7 +108,12 @@ pnpm dev:receipts
 pnpm dev:web
 ```
 
-Then pay for something:
+Open http://localhost:4020. From the dashboard you can create an agent with a
+spending limit, send it to buy something from the demo seller (one item is over
+most limits, one comes from an unverified look-alike seller), open the receipt
+or the declined payment, and revoke the agent.
+
+The same payment from the command line:
 
 ```bash
 pnpm agent -- http://localhost:4021/weather
@@ -193,6 +198,22 @@ export SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk
    ```bash
    node --env-file=.env scripts/agent-transfer.ts --to <MERCHANT_ADDRESS> --amount 1
    ```
+
+## Demo shortcuts to know about
+
+The dashboard is real against testnet, but three things are simplified:
+
+- **The API signs as the owner.** `apps/receipts` holds `OWNER_SECRET` so the
+  dashboard can create and revoke mandates without a wallet. A real deployment
+  has the owner sign with their own wallet or a passkey.
+- **The API holds agent keys.** "Send to buy" runs the agent's purchase from the
+  API, so it keeps each agent's key in its local database. A real agent holds its
+  own key.
+- **No sign-in.** The API has no authentication. Run it on localhost only.
+
+When a payment is refused, the network only says "not authorized". The reason
+shown ("Over the daily spending limit", "Seller is not verified") is worked out
+by the API from the mandate's limit and the seller registry.
 
 ## What we learned about x402 and smart accounts
 

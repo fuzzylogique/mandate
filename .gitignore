@@ -7,3 +7,4 @@ dist/
 *.sqlite-*
 contracts/target/
 .DS_Store
+.claude/

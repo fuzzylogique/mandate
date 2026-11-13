@@ -1,4 +1,4 @@
-// Creates funded testnet accounts (merchant, agent, owner, facilitator), gives each
+// Creates funded testnet accounts (merchant, agent, owner, facilitator, look-alike seller), gives each
 // a USDC trustline, and writes them to .env. Safe to re-run: accounts already
 // present in .env are kept.
 //
@@ -12,7 +12,7 @@ const EXAMPLE_PATH = new URL("../.env.example", import.meta.url);
 const HORIZON_URL = "https://horizon-testnet.stellar.org";
 // Circle's testnet USDC issuer (classic asset; the SAC address is derived from it).
 const USDC = new Asset("USDC", "GBBD47IF6LWK7P7MDEVSCWR7DPUWV3NY3DTQEVFL4NAT4AQH3ZLLFLA5");
-const ROLES = ["MERCHANT", "AGENT", "OWNER", "FACILITATOR"] as const;
+const ROLES = ["MERCHANT", "AGENT", "OWNER", "FACILITATOR", "IMPOSTOR"] as const;
 
 const horizon = new Horizon.Server(HORIZON_URL);
 

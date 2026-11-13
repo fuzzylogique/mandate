@@ -260,6 +260,9 @@ importers:
 
   apps/receipts:
     dependencies:
+      '@mandate/agent':
+        specifier: workspace:*
+        version: link:../agent
       '@mandate/shared':
         specifier: workspace:*
         version: link:../../packages/shared

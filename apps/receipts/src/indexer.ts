@@ -1,8 +1,5 @@
 // Reads `PaymentAuthorized` events from the verified-seller policy contract
 // and turns each one into a receipt.
-//
-// NOT YET RUN against a deployed policy: the event layout below matches the
-// contract source, but confirm it with a real event before relying on it.
 import { rpc, scValToNative, xdr } from "@stellar/stellar-sdk";
 import type { Receipt } from "@mandate/shared";
 import type { ReceiptStore } from "./store.ts";
@@ -23,10 +20,12 @@ export interface IndexerOptions {
   store: ReceiptStore;
   onReceipt?: (receipt: Omit<Receipt, "annotation">) => void | Promise<void>;
   pollMs?: number;
+  /** How far back a first run scans. 17,280 ledgers is about a day. */
+  lookbackLedgers?: number;
 }
 
 export function startIndexer(options: IndexerOptions): () => void {
-  const { rpcUrl, policyContractId, store, onReceipt, pollMs = 5000 } = options;
+  const { rpcUrl, policyContractId, store, onReceipt, pollMs = 5000, lookbackLedgers = 17_280 } = options;
   const server = new rpc.Server(rpcUrl);
   const filters: rpc.Api.EventFilter[] = [
     {
@@ -37,16 +36,17 @@ export function startIndexer(options: IndexerOptions): () => void {
   ];
   let stopped = false;
 
+  // A first run looks back about a day, or as far as the RPC still keeps events.
+  async function firstLedger(): Promise<number> {
+    const health = await server.getHealth();
+    return Math.max(health.oldestLedger, health.latestLedger - lookbackLedgers, 1);
+  }
+
   async function poll(): Promise<void> {
     const cursor = store.getCursor();
-    // RPC only keeps recent events, so a first run starts near the tip.
     const page = cursor
       ? await server.getEvents({ filters, cursor, limit: 100 })
-      : await server.getEvents({
-          filters,
-          startLedger: Math.max(1, (await server.getLatestLedger()).sequence - 1000),
-          limit: 100,
-        });
+      : await server.getEvents({ filters, startLedger: await firstLedger(), limit: 100 });
 
     for (const event of page.events) {
       const [, smartAccount, seller] = event.topic.map((topic) => scValToNative(topic) as string);

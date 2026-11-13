@@ -31,8 +31,8 @@ This is the gap Problem Space 2 names: the identity and authorization of
 software agents acting for people must be provable.
 
 Mandate is a Stellar smart account where the owner issues each agent a mandate:
-a spending limit per period, verified sellers only, and an expiry date. Soroban
-contracts check these rules at payment time, so an over-limit payment or a
+a spending limit per period, verified sellers only, and an expiry date. Stellar Smart
+Contracts check these rules at payment time, so an over-limit payment or a
 payment to an impersonator fails on-chain, whatever the agent does. Every
 payment that succeeds produces a receipt showing the agent, the authorizing
 owner, the verified seller, the amount and the transaction.

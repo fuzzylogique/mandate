@@ -46,3 +46,87 @@ export function formatAmount(baseUnits: string, decimals = TOKEN_DECIMALS): stri
   const fraction = digits.slice(-decimals).replace(/0+$/, "");
   return `${negative ? "-" : ""}${whole}${fraction ? `.${fraction}` : ""}`;
 }
+
+/** "0.15" -> "1500000" (base units, as a decimal string). */
+export function toBaseUnits(amount: string, decimals = TOKEN_DECIMALS): string {
+  const [whole = "0", fraction = ""] = amount.trim().split(".");
+  const digits = `${whole}${fraction.padEnd(decimals, "0").slice(0, decimals)}`;
+  return BigInt(digits || "0").toString();
+}
+
+// ---------- Dashboard API (apps/receipts -> apps/web) ----------
+
+export interface TokenInfo {
+  /** Token contract (C-address). */
+  id: string;
+  /** "USDC", "XLM", ... */
+  symbol: string;
+}
+
+export type MandatePeriod = "day" | "week" | "month";
+
+/** One agent and the rules it spends under. */
+export interface Mandate {
+  /** Context rule id on the smart account. */
+  ruleId: number;
+  /** Agent name shown to the owner. */
+  name: string;
+  status: "active" | "revoked";
+  token: TokenInfo;
+  /** Limit per period, base units. Null once revoked. */
+  limit: string | null;
+  /** Spent in the current period, base units. */
+  spent: string;
+  period: MandatePeriod | null;
+  createdAt: string;
+}
+
+export interface Seller {
+  /** Payment account (G-address). */
+  address: string;
+  name: string;
+  domain: string;
+  /** True if the on-chain seller registry lists this account. */
+  verified: boolean;
+}
+
+/** Something the demo agent can be sent to buy. */
+export interface CatalogItem {
+  id: string;
+  title: string;
+  seller: Seller;
+  /** Price in whole tokens, e.g. "0.01". */
+  price: string;
+}
+
+export interface Overview {
+  owner: { name: string };
+  account: { address: string; token: TokenInfo; balance: string };
+  mandates: Mandate[];
+  sellers: Seller[];
+  catalog: CatalogItem[];
+}
+
+/** One line of the activity feed: a payment that went through, or one that was refused. */
+export interface Activity {
+  id: string;
+  kind: "paid" | "declined";
+  at: string;
+  agent: { ruleId: number; name: string };
+  seller: Seller;
+  /** What was bought, in words. */
+  item: string;
+  /** Base units. */
+  amount: string;
+  token: TokenInfo;
+  /** Paid only. */
+  txHash?: string;
+  /** Declined only: why, in plain words. */
+  reason?: string;
+}
+
+export interface PurchaseResult {
+  status: "paid" | "declined";
+  txHash?: string;
+  reason?: string;
+}
