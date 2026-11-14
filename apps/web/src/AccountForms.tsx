@@ -18,7 +18,7 @@ export function AccountForms({ action, onDone, onClose }: Props) {
   const account = action.account;
   const traditional = account.rail === "traditional";
   const grant = action.kind === "pay" ? action.mandate : undefined;
-  const title = action.kind === "fund" ? "Add funds" : traditional ? "Make a traditional demo payment" : "Make a Stellar payment";
+  const title = action.kind === "fund" ? "Add funds" : "Make a payment";
   const change = (update: () => void) => { update(); setRequestId(crypto.randomUUID()); };
   const submit = async (event: FormEvent) => {
     event.preventDefault(); setBusy(true); setError("");
@@ -32,14 +32,14 @@ export function AccountForms({ action, onDone, onClose }: Props) {
   return <Dialog title={title} onClose={() => { if (!busy) onClose(); }}>
     <form className="form" onSubmit={event => void submit(event)}>
       <p className="muted">{account.name} · {account.currency} · {traditional ? "Traditional account" : "Stellar account"}</p>
-      {action.kind === "fund" ? <p className="form-note">{traditional ? "Add simulated USD to this account." : "Add testnet XLM to your Stellar account. Funding completes automatically."}</p> : <>
-        {grant && <p className="form-note">{grant.name}: {formatValue(grant.spent, account.currency)} of {money(grant.limit, account.currency)} used. Only verified recipients are allowed.</p>}
-        <Field label={traditional ? "Traditional recipient reference" : "Recipient Stellar account ID"}><input required maxLength={traditional ? 128 : 56} value={recipient} disabled={busy} onChange={event => change(() => setRecipient(event.target.value))} placeholder={traditional ? "BANK_DEMO_… or DEMO-…" : "C…"} /></Field>
+      {action.kind === "fund" ? <p className="form-note">{traditional ? "Add demo USD to this account. Your balance updates when funding confirms." : "Add demo USD to your Stellar account. Funding completes automatically."}</p> : <>
+        {grant && <p className="form-note">{grant.name}: {formatValue(grant.spent, grant.currency ?? account.currency)} of {money(grant.limit, grant.currency ?? account.currency)} used. Only verified recipients are allowed.</p>}
+        <Field label="Recipient Smart Account address"><input required maxLength={56} value={recipient} disabled={busy} onChange={event => change(() => setRecipient(event.target.value))} placeholder="C…" /></Field>
         <Field label="Payment reference"><input required maxLength={200} value={reference} disabled={busy} onChange={event => change(() => setReference(event.target.value))} /></Field>
       </>}
-      <Field label={`Amount (${account.currency})`}><input required inputMode="decimal" pattern={traditional ? "[0-9]+(\\.[0-9]{1,2})?" : "[0-9]+(\\.[0-9]{1,7})?"} value={amount} disabled={busy} onChange={event => change(() => setAmount(event.target.value))} placeholder="0.00" /></Field>
+      <Field label="Amount (USD)"><input required inputMode="decimal" pattern={action.kind === "fund" ? "[0-9]+(\\.[0-9]{1,2})?" : "[0-9]+(\\.[0-9]{1,7})?"} value={amount} disabled={busy} onChange={event => change(() => setAmount(event.target.value))} placeholder="0.00" /></Field>
       {error && <p className="form-error" role="alert">{error}</p>}
-      <div className="form-actions"><button type="button" className="button" disabled={busy} onClick={onClose}>Cancel</button><button className="button is-primary" disabled={busy}>{busy ? traditional ? "Saving demo…" : "Confirming on Stellar…" : action.kind === "pay" ? "Confirm payment" : "Add funds"}</button></div>
+      <div className="form-actions"><button type="button" className="button" disabled={busy} onClick={onClose}>Cancel</button><button className="button is-primary" disabled={busy}>{busy ? "Confirming on Stellar…" : action.kind === "pay" ? "Confirm payment" : "Add funds"}</button></div>
     </form>
   </Dialog>;
 }

@@ -1,8 +1,9 @@
 # Stellar testnet setup
 
 The current app consists of the web dashboard, payments API, shared TypeScript
-helpers and five Rust contracts. Traditional accounts use a local demo ledger;
-Stellar accounts use native XLM on testnet.
+helpers and five Rust contracts. Both account options use Smart Accounts on
+testnet. Both fund and pay with issued demo USD. One mandate flow uses USD
+automatically, and the dashboard exposes only the actual USD token balance.
 
 ## Prerequisites
 
@@ -37,12 +38,15 @@ captured privately and never printed. Re-running preserves configured contract I
 | `mandate-verified-smart-policy` | `PAYMENTS_VERIFIED_SMART_POLICY_ID` | Rejects unverified recipients and Classic G-address recipients |
 
 Account opening creates a dedicated Classic wallet, activates it through Friendbot,
-deploys its Smart contract, installs the owner payment rule and attests the C address.
+deploys its Smart contract, installs the USD owner payment rule and attests the C address.
 The private `stellarPairs` mapping is one-to-one. The UI and public account API show
-one Stellar account with the contract's C address and balance.
+one account with the contract's C address and live USD balance.
 
-Add funds first deposits the requested XLM amount into the mapped Classic wallet
-and then transfers it into Smart. The Classic wallet keeps its separate activation
+For Stellar accounts, Add funds deposits demo USD into the mapped Classic wallet
+and transfers it into Smart. For traditional accounts, it first credits simulated
+USD in a private fiat ledger. The demo anchor issues 1 testnet USD token per demo
+dollar into the mapped Classic trustline and forwards it through the USD Stellar
+Asset Contract into Smart. The Classic wallet keeps its separate activation
 and fee budget. Both funding steps use persisted transaction IDs; retries resume
 without repeating a successful deposit. Payments transfer from Smart to Smart.
 
@@ -53,7 +57,20 @@ are relative to `apps/receipts` when using `pnpm dev`. The default is `workspace
 The browser uses port 4020 and proxies API requests to port 4022. Keep `WEB_ORIGIN`
 aligned with the browser origin if you change hosting.
 
-The current asset is XLM. RPC and Horizon must both use Stellar testnet. The API
+The application payment asset is a local demo USD asset. XLM is used privately
+for network fees and reserves. Its issuer key is
+automatically generated and stored encrypted in the existing custody vault. The USD
+Stellar Asset Contract is deployed automatically during account opening; no extra
+environment settings or custom token WASM are needed. `/api/network` exposes both
+the USD contract and public USD issuer. These USD tokens are not real dollars
+or USDC. The local demo anchor does not implement SEP-6/SEP-24 or contact a bank.
+
+Both account options use USD automatically. Every new mandate is scoped to the
+USD asset contract. Existing XLM is preserved on chain without converting it or
+counting it as USD. Older XLM mandates must be replaced with new USD mandates
+for payments through the app.
+
+RPC and Horizon must both use Stellar testnet. The API
 checks network passphrases, configured contracts, registry administrator identity,
 and custody-key access before starting. The RPC variable is `PAYMENTS_RPC_URL` so
 the Stellar CLI does not implicitly consume it as `STELLAR_RPC_URL`.
@@ -75,8 +92,16 @@ pnpm test:chain
 
 The service tests use a fake network and real SQLite storage. The chain check uses
 fresh testnet wallets, actual contracts and Friendbot funds. It checks one-to-one
-mapping, both funding transactions, Smart-to-Smart settlement, third-party secret mandate IDs, idempotency, unverified-recipient refusal, spending limits and revocation.
+mapping, demo USD issuance and forwarding for both options, Smart-to-Smart settlement,
+third-party secret mandate IDs, idempotency, unverified-recipient refusal, asset
+scoping, USD spending limits and revocation. It also verifies that hidden XLM
+balances cannot be spent with a USD mandate.
 It writes public transaction receipts to a temporary directory without printing keys.
 
 The seller registry is an administrator attestation of an exact C address. Automatic
 account opening does not perform KYC, business checks or domain ownership checks.
+
+Legacy local traditional accounts retain their IDs and migrate their demo balances
+to the new USD asset when the workspace loads. Migration is journaled and retryable.
+Old service-only mandates are revoked and must be recreated. Historical simulated
+receipts remain in Activity.

@@ -33,7 +33,17 @@ export function amount(value: unknown): bigint {
   return units;
 }
 export interface CustomerRecord extends Customer { password: string }
-export interface MandateRecord extends Omit<AccountMandate, "reference"> { id: string; mandateIdHash?: string }
+export interface MandateRecord extends Omit<AccountMandate, "reference" | "enforcement"> {
+  id: string; mandateIdHash?: string;
+  /** Service mandates are retained only as revoked historical records after upgrade. */
+  enforcement?: "service" | "on-chain";
+  rail?: "traditional" | "blockchain";
+}
+export interface AnchorDeposit {
+  id: string; accountId: string; amount: string;
+  status: "credited" | "anchored" | "completed";
+  depositTxHash?: string; forwardingTxHash?: string;
+}
 export function validateMandateInput(body: Record<string, unknown>): Pick<AccountMandate, "name" | "recipientType" | "recipient" | "limit" | "period" | "expiresAt"> {
   requireThat(body.recipientType === "person" || body.recipientType === "agent", 400, "Choose a person or agent");
   requireThat(body.period === "day" || body.period === "week" || body.period === "month", 400, "Choose a spending period");
@@ -56,6 +66,9 @@ export interface State {
   mandates: MandateRecord[];
   entries: EntryRecord[];
   sessions: { hash: string; customerId: string; expiresAt: string }[];
+  traditionalUpgrades?: { accountId: string; balance: string; completed: boolean }[];
+  fiatAccounts?: { accountId: string; balance: string }[];
+  anchorDeposits?: AnchorDeposit[];
   demoRequests?: { id: string; fingerprint: string; result: unknown }[];
 }
 export function mandateSpent(state: State, mandate: MandateRecord): bigint {
@@ -70,7 +83,7 @@ const emptyState = (): State => ({ schemaVersion: 1, customers: [], accounts: []
 const publicCustomer = ({ id, name, email }: CustomerRecord): Customer => ({ id, name, email });
 export const publicEntry = ({ ownerId: _owner, actorId: _actor, requestId: _request, mandateId, ...entry }: EntryRecord): PaymentEntry => ({ ...entry, mandateReference: mandateId });
 
-/** Local authentication, workspace ownership and the transactional demo-bank ledger. */
+/** Local authentication, workspace ownership and transactional fiat/anchor journals. */
 export class WorkspaceStore {
   private db: DatabaseSync;
   constructor(path: string) {
@@ -152,8 +165,8 @@ export class WorkspaceStore {
   }
   logout(token: string) { this.update(state => { state.sessions = state.sessions.filter(s => s.hash !== hash(token)); }); }
   mandateView(state: State, mandate: MandateRecord): AccountMandate {
-    const { mandateIdHash: _secret, id, ...details } = mandate;
-    const view: AccountMandate = { ...details, reference: id };
+    const { mandateIdHash: _secret, id, rail: _rail, enforcement, ...details } = mandate;
+    const view: AccountMandate = { ...details, reference: id, ...(enforcement === "on-chain" ? { enforcement } : {}) };
     view.spent = decimal(mandateSpent(state, mandate));
     view.status = mandate.status === "revoked" ? "revoked" : mandate.expiresAt <= now() ? "expired" : "active";
     return view;

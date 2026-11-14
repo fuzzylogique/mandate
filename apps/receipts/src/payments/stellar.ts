@@ -44,16 +44,16 @@ export interface ChainGateway {
   wallet(id: string): ChainWallet;
   secret(id: string, value: () => string): string;
   command<T>(id: string, input: unknown, work: () => Promise<T>): Promise<T>;
-  balance(wallet: ChainWallet): Promise<bigint>;
+  balance(wallet: ChainWallet, currency?: string): Promise<bigint>;
   faucet(wallet: ChainWallet): Promise<ChainReceipt & { amount: string }>;
-  deposit(id: string, wallet: ChainWallet, amount: bigint): Promise<ChainReceipt>;
+  deposit(id: string, wallet: ChainWallet, amount: bigint, currency?: string): Promise<ChainReceipt>;
   createAccount(id: string, treasury: ChainWallet): Promise<ChainWallet & ChainReceipt>;
-  transfer(id: string, treasury: ChainWallet, source: ChainWallet, destination: string, amount: bigint, mandate?: { id: string; ruleId: number }): Promise<ChainReceipt>;
-  addMandate(id: string, treasury: ChainWallet, account: ChainWallet, input: { name: string; limit: bigint; period: SpendingPeriod; expiresAt: string }): Promise<{ ruleId: number } & ChainReceipt>;
+  transfer(id: string, treasury: ChainWallet, source: ChainWallet, destination: string, amount: bigint, mandate?: { id: string; ruleId: number }, currency?: string): Promise<ChainReceipt>;
+  addMandate(id: string, treasury: ChainWallet, account: ChainWallet, input: { name: string; limit: bigint; period: SpendingPeriod; expiresAt: string; currency?: string }): Promise<{ ruleId: number } & ChainReceipt>;
   revokeMandate(id: string, treasury: ChainWallet, account: ChainWallet, ruleId: number): Promise<ChainReceipt>;
   spent(account: ChainWallet, ruleId: number): Promise<bigint>;
   isVerifiedSmartAccount(address: string): Promise<boolean>;
-  verifySmartAccount(id: string, account: ChainWallet, treasury: ChainWallet): Promise<ChainReceipt>;
+  verifySmartAccount(id: string, account: ChainWallet, treasury: ChainWallet, currency?: string): Promise<ChainReceipt>;
   hasTransaction(id: string): boolean;
   close(): void;
 }
@@ -65,6 +65,7 @@ export class StellarGateway implements ChainGateway {
   private db: DatabaseSync;
   private server: rpc.Server;
   private asset: Asset;
+  private usdAsset: Asset;
   private key: Buffer;
   private queue: Promise<unknown> = Promise.resolve();
   private wasmHash?: string;
@@ -94,6 +95,12 @@ export class StellarGateway implements ChainGateway {
       CREATE TABLE IF NOT EXISTS chain_configuration (id INTEGER PRIMARY KEY CHECK(id=1), fingerprint TEXT NOT NULL);
       CREATE TABLE IF NOT EXISTS chain_owner_payment_rules (id TEXT PRIMARY KEY, rule_id INTEGER NOT NULL);
     `);
+    // The issuer is stable for this encrypted vault, including process restarts.
+    this.usdAsset = new Asset("USD", this.keypair("anchor:USD:issuer").publicKey());
+    this.network.assets = [
+      { currency: "XLM", tokenContract: this.network.tokenContract },
+      { currency: "USD", code: "USD", issuer: this.usdAsset.getIssuer(), tokenContract: this.usdAsset.contractId(Networks.TESTNET) },
+    ];
     const fingerprint = createHash("sha256").update(JSON.stringify({ network: this.network.id, token: this.network.tokenContract, verifier: config.verifier ?? null, spendingLimitPolicy: config.spendingLimitPolicy ?? null })).digest("hex");
     this.db.prepare("INSERT OR IGNORE INTO chain_configuration VALUES (1, ?)").run(fingerprint);
     const saved = this.db.prepare("SELECT fingerprint FROM chain_configuration WHERE id=1").get() as { fingerprint: string };
@@ -182,9 +189,14 @@ export class StellarGateway implements ChainGateway {
     const result = await this.server.getLedgerEntries(key);
     return BigInt(result.entries[0]?.val.account().balance().toString() ?? "0");
   }
-  async balance(wallet: ChainWallet): Promise<bigint> {
-    if (wallet.rail === "classic") return this.nativeBalance(wallet.address);
-    const balance = await this.server.getAssetBalance(wallet.address, this.asset, Networks.TESTNET);
+  private paymentAsset(currency = "XLM"): Asset {
+    requireThat(currency === "XLM" || currency === "USD", 400, "Unsupported payment currency");
+    return currency === "USD" ? this.usdAsset : this.asset;
+  }
+  async balance(wallet: ChainWallet, currency = "XLM"): Promise<bigint> {
+    const asset = this.paymentAsset(currency);
+    if (wallet.rail === "classic" && asset.isNative()) return this.nativeBalance(wallet.address);
+    const balance = await this.server.getAssetBalance(wallet.address, asset, Networks.TESTNET);
     return BigInt(balance.balanceEntry?.amount ?? "0");
   }
   async faucet(wallet: ChainWallet): Promise<ChainReceipt & { amount: string }> {
@@ -212,7 +224,9 @@ export class StellarGateway implements ChainGateway {
     return { txHash, amount: credited ?? formatAmount((after - before).toString()) };
   }
   /** Testnet funding provider: credit the selected amount to the hidden Classic wallet. */
-  async deposit(id: string, wallet: ChainWallet, units: bigint): Promise<ChainReceipt> {
+  async deposit(id: string, wallet: ChainWallet, units: bigint, currency = "XLM"): Promise<ChainReceipt> {
+    if (currency === "USD") return this.depositUsd(id, wallet, units);
+    this.paymentAsset(currency);
     const transactionId = `deposit:${id}`;
     const source = this.treasury(`funding-source:${id}`);
     // The source and signed deposit are persistent, so a retry cannot issue a second credit.
@@ -221,6 +235,28 @@ export class StellarGateway implements ChainGateway {
       requireThat(await this.balance(source) >= units + 20_000_000n, 400, "Amount exceeds the available testnet funding allowance");
     }
     return this.transfer(transactionId, source, source, wallet.address, units);
+  }
+  private async ensureUsdAsset(): Promise<void> {
+    const issuer = this.treasury("anchor:USD:issuer");
+    // Check for an existing SAC before deployment, including after a restart.
+    const key = xdr.LedgerKey.contractData(new xdr.LedgerKeyContractData({
+      contract: Address.fromString(this.usdAsset.contractId(Networks.TESTNET)).toScAddress(),
+      key: xdr.ScVal.scvLedgerKeyContractInstance(), durability: xdr.ContractDataDurability.persistent(),
+    }));
+    if ((await this.server.getLedgerEntries(key)).entries.length) return;
+    await this.faucet(issuer);
+    await this.execute("anchor:USD:asset", () => this.contract(this.keypair(issuer.id), Operation.createStellarAssetContract({ asset: this.usdAsset })));
+  }
+  private async depositUsd(id: string, wallet: ChainWallet, units: bigint): Promise<ChainReceipt> {
+    requireThat(wallet.rail === "classic", 400, "Anchor deposits require the mapped Classic wallet");
+    await this.ensureUsdAsset();
+    const issuer = this.treasury("anchor:USD:issuer");
+    if (await this.nativeBalance(issuer.address) === 0n) await this.faucet(issuer);
+    return this.execute(`deposit:${id}`, () => this.classic(this.keypair(issuer.id), [
+      // Setting the same trust limit is safe for subsequent deposits.
+      Operation.changeTrust({ source: wallet.address, asset: this.usdAsset }),
+      Operation.payment({ destination: wallet.address, asset: this.usdAsset, amount: formatAmount(units.toString()) }),
+    ], [this.keypair(wallet.id)]));
   }
   private async classic(payer: Keypair, operations: xdr.Operation[], extraSigners: Keypair[] = []): Promise<Transaction> {
     const account = await this.server.getAccount(payer.publicKey());
@@ -305,9 +341,11 @@ export class StellarGateway implements ChainGateway {
     if (!StrKey.isValidContract(address) || !this.config.sellerRegistry) return false;
     return this.readContract<boolean>(this.config.sellerRegistry, "is_verified", [Address.fromString(address).toScVal()]);
   }
-  async verifySmartAccount(id: string, account: ChainWallet, treasury: ChainWallet): Promise<ChainReceipt> {
+  async verifySmartAccount(id: string, account: ChainWallet, treasury: ChainWallet, currency = "XLM"): Promise<ChainReceipt> {
     requireThat(account.rail === "blockchain" && StrKey.isValidContract(account.address), 400, "Only smart accounts can be verified");
     requireThat(this.config.sellerRegistry && this.config.registryAdminSecret, 503, "Configure the seller registry and its admin key to open verified smart accounts");
+    if (currency === "USD") await this.ensureUsdAsset();
+    const tokenContract = this.paymentAsset(currency).contractId(Networks.TESTNET);
     // Attest only actual deployed smart accounts, never a name or a client-provided checkbox.
     await this.readContract(account.address, "get_context_rule", [xdr.ScVal.scvU32(0)]);
     const admin = Keypair.fromSecret(this.config.registryAdminSecret);
@@ -317,23 +355,29 @@ export class StellarGateway implements ChainGateway {
     requireThat(this.config.verifiedSmartPolicy, 503, "Verified-smart payment policy is required");
     const owner = this.keypair(treasury.id);
     const params = xdr.ScVal.scvMap([new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("registry"), val: Address.fromString(this.config.sellerRegistry).toScVal() })]);
-    const args = [xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("CallContract"), Address.fromString(this.network.tokenContract).toScVal()]), nativeToScVal("smart-payments", { type: "string" }), xdr.ScVal.scvVoid(), xdr.ScVal.scvVec([externalSigner(this.config.verifier!, owner)]), xdr.ScVal.scvMap([new xdr.ScMapEntry({ key: Address.fromString(this.config.verifiedSmartPolicy).toScVal(), val: params })])];
-    const rule = await this.execute(`owner-payment-rule:${id}`, () => this.contract(owner, Operation.invokeContractFunction({ contract: account.address, function: "add_context_rule", args }), { wallet: account, signer: owner, ruleId: 0 }));
+    const args = [xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("CallContract"), Address.fromString(tokenContract).toScVal()]), nativeToScVal("smart-payments", { type: "string" }), xdr.ScVal.scvVoid(), xdr.ScVal.scvVec([externalSigner(this.config.verifier!, owner)]), xdr.ScVal.scvMap([new xdr.ScMapEntry({ key: Address.fromString(this.config.verifiedSmartPolicy).toScVal(), val: params })])];
+    const rule = await this.execute(`owner-payment-rule:${currency === "XLM" ? id : `${id}:${currency}`}`, () => this.contract(owner, Operation.invokeContractFunction({ contract: account.address, function: "add_context_rule", args }), { wallet: account, signer: owner, ruleId: 0 }));
     requireThat(rule.result, 502, "Smart-account payment rule was not returned");
     const ruleId = (scValToNative(xdr.ScVal.fromXDR(rule.result, "base64")) as { id: number }).id;
-    this.db.prepare("INSERT OR IGNORE INTO chain_owner_payment_rules VALUES (?, ?)").run(id, ruleId);
+    this.db.prepare("INSERT OR IGNORE INTO chain_owner_payment_rules VALUES (?, ?)").run(currency === "XLM" ? id : `${id}:${currency}`, ruleId);
     return verified;
   }
-  async transfer(id: string, treasury: ChainWallet, source: ChainWallet, destination: string, units: bigint, mandate?: { id: string; ruleId: number }): Promise<ChainReceipt> {
+  async transfer(id: string, treasury: ChainWallet, source: ChainWallet, destination: string, units: bigint, mandate?: { id: string; ruleId: number }, currency = "XLM"): Promise<ChainReceipt> {
+    const asset = this.paymentAsset(currency);
     requireThat(StrKey.isValidEd25519PublicKey(destination) || StrKey.isValidContract(destination), 400, "Enter a valid Stellar recipient address");
     const payer = this.keypair(treasury.id);
+    if (source.rail === "blockchain" && !mandate && currency === "USD") {
+      const installed = this.db.prepare("SELECT rule_id FROM chain_owner_payment_rules WHERE id=?").get(`${source.id}:USD`);
+      if (!installed) await this.verifySmartAccount(source.id, source, treasury, currency);
+    }
     if (source.rail === "classic" && destination.startsWith("G")) {
-      return this.execute(id, () => this.classic(payer, [Operation.payment({ source: source.address, destination, asset: this.asset, amount: formatAmount(units.toString()) })], source.id === treasury.id ? [] : [this.keypair(source.id)]));
+      return this.execute(id, () => this.classic(payer, [Operation.payment({ source: source.address, destination, asset, amount: formatAmount(units.toString()) })], source.id === treasury.id ? [] : [this.keypair(source.id)]));
     }
     return this.execute(id, async () => {
-      const op = Operation.invokeContractFunction({ contract: this.network.tokenContract, function: "transfer", args: [Address.fromString(source.address).toScVal(), Address.fromString(destination).toScVal(), nativeToScVal(units, { type: "i128" })] });
+      const op = Operation.invokeContractFunction({ contract: asset.contractId(Networks.TESTNET), function: "transfer", args: [Address.fromString(source.address).toScVal(), Address.fromString(destination).toScVal(), nativeToScVal(units, { type: "i128" })] });
       if (source.rail === "blockchain") {
-        const ruleId = mandate?.ruleId ?? source.paymentRuleId;
+        const savedRule = this.db.prepare("SELECT rule_id FROM chain_owner_payment_rules WHERE id=?").get(currency === "XLM" ? source.id : `${source.id}:${currency}`) as { rule_id: number } | undefined;
+        const ruleId = mandate?.ruleId ?? savedRule?.rule_id;
         requireThat(ruleId !== undefined, 409, "The account payment rule is missing");
         return this.contract(payer, op, { wallet: source, signer: mandate ? this.keypair(`signer:${mandate.id}`) : payer, ruleId });
       }
@@ -342,11 +386,12 @@ export class StellarGateway implements ChainGateway {
       return this.contract(payer, op);
     });
   }
-  async addMandate(id: string, treasury: ChainWallet, account: ChainWallet, input: { name: string; limit: bigint; period: SpendingPeriod; expiresAt: string }): Promise<{ ruleId: number } & ChainReceipt> {
+  async addMandate(id: string, treasury: ChainWallet, account: ChainWallet, input: { name: string; limit: bigint; period: SpendingPeriod; expiresAt: string; currency?: string }): Promise<{ ruleId: number } & ChainReceipt> {
     requireThat(this.config.sellerRegistry && this.config.verifiedSmartPolicy, 503, "Configure the verified-smart policy and registry before creating mandates");
     const signer = this.keypair(`signer:${id}`);
     const payer = this.keypair(treasury.id);
     const latest = await this.server.getLatestLedger();
+    const tokenContract = this.paymentAsset(input.currency).contractId(Networks.TESTNET);
     const ledgers = { day: 17280, week: 120960, month: 518400 };
     const expiry = latest.sequence + Math.max(1, Math.floor((Date.parse(input.expiresAt) - Date.now()) / 5000));
     const params = xdr.ScVal.scvMap([
@@ -359,7 +404,7 @@ export class StellarGateway implements ChainGateway {
     const registryParams = xdr.ScVal.scvMap([new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("registry"), val: Address.fromString(this.config.sellerRegistry!).toScVal() })]);
     const policies = [{ address: this.config.spendingLimitPolicy!, params }, { address: this.config.verifiedSmartPolicy!, params: registryParams }]
       .sort((a, b) => Buffer.compare(Address.fromString(a.address).toBuffer(), Address.fromString(b.address).toBuffer()));
-    const args = [xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("CallContract"), Address.fromString(this.network.tokenContract).toScVal()]), nativeToScVal(label, { type: "string" }), xdr.ScVal.scvU32(expiry), xdr.ScVal.scvVec([externalSigner(this.config.verifier!, signer)]), xdr.ScVal.scvMap(policies.map(policy => new xdr.ScMapEntry({ key: Address.fromString(policy.address).toScVal(), val: policy.params })))];
+    const args = [xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("CallContract"), Address.fromString(tokenContract).toScVal()]), nativeToScVal(label, { type: "string" }), xdr.ScVal.scvU32(expiry), xdr.ScVal.scvVec([externalSigner(this.config.verifier!, signer)]), xdr.ScVal.scvMap(policies.map(policy => new xdr.ScMapEntry({ key: Address.fromString(policy.address).toScVal(), val: policy.params })))];
     const receipt = await this.execute(`mandate:${id}`, () => this.contract(payer, Operation.invokeContractFunction({ contract: account.address, function: "add_context_rule", args }), { wallet: account, signer: payer, ruleId: 0 }));
     requireThat(receipt.result, 502, "Mandate creation did not return a rule");
     const result = scValToNative(xdr.ScVal.fromXDR(receipt.result, "base64")) as { id: number };

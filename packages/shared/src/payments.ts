@@ -18,8 +18,7 @@ export interface SpendingAccount {
   type: AccountType;
   verified?: boolean;
   verificationTxHash?: string;
-  bankDetails?: { bankName: string; accountNumber: string };
-  verificationSource?: "demo" | "on-chain";
+  verificationSource?: "on-chain";
   currency: PaymentCurrency;
   /** Decimal amounts with seven places; never floating point arithmetic. */
   balance: string;
@@ -44,10 +43,10 @@ export interface AccountMandate {
   status: "active" | "expired" | "revoked";
   createdAt: string;
   ruleId?: number;
-  enforcement?: "service" | "on-chain";
+  enforcement?: "on-chain";
+  currency?: string;
   chainRevocationPending?: boolean;
   verifiedRecipientsOnly?: boolean;
-  rail?: "traditional" | "blockchain";
 }
 
 export interface PaymentEntry {
@@ -101,11 +100,9 @@ export interface MandatePaymentInput {
   amount: string;
   reference: string;
   requestId: string;
-  rail?: "traditional" | "blockchain";
 }
 
 export interface MandatePaymentPreview {
-  rail?: "traditional" | "blockchain";
   mandate: { name: string; address: string; limit: string; spent: string; expiresAt: string };
   seller: { address: string; name: string; verified: boolean };
   currency: string;
@@ -126,7 +123,6 @@ export interface CreateAccountMandateInput {
   period: SpendingPeriod;
   expiresAt: string;
   requestId?: string;
-  rail?: "traditional" | "blockchain";
 }
 
 export interface PaymentNetwork {
@@ -141,4 +137,5 @@ export interface PaymentNetwork {
   verifiedSmartAccounts?: boolean;
   mandates?: boolean;
   faucet: boolean;
+  assets?: { currency: string; tokenContract: string; code?: string; issuer?: string }[];
 }

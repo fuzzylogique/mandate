@@ -2,11 +2,14 @@
 
 An email/password payment workspace with two account types:
 
-- **Traditional account:** simulated USD banking with a local ledger.
-- **Stellar account:** one visible account with a Smart Account C address and XLM balance on Stellar testnet.
+- **Traditional account:** demo USD funding, settled as issued USD tokens on Stellar testnet.
+- **Stellar account:** a USD Smart Account on Stellar testnet.
 
-The login holds no money. Every Stellar account has a private, one-to-one mapping
-between its Smart contract and a Classic wallet. Opening and funding manage both
+Both expose one Smart Account C address and use the same on-chain mandate and payment system.
+
+The login holds no money. Every account has a private, one-to-one mapping
+between its Smart contract and a Classic wallet. Traditional accounts also have
+a private demo fiat ledger connected to the demo anchor. Opening and funding manage both
 in the background. Users never select or manage the Classic wallet.
 
 ## Run
@@ -41,67 +44,82 @@ are reused. See [Stellar setup](docs/stellar-testnet.md).
 Choose **Accounts → Open account**, select Traditional or Stellar, and enter a name.
 Both start with zero visible balance.
 
-Traditional accounts use the fictional **Mandate Demo Bank**, a `DEMO-…` account
-number and a `BANK_DEMO_…` recipient reference. **Add funds** credits simulated USD
-directly to that account. Traditional payments transfer those balances between
-verified demo recipients. USD amounts accept up to two decimal places. There is
-no bank-provider integration or conversion between demo USD and XLM.
+Both account options automatically provision a dedicated Classic wallet, deploy a
+Smart contract, install asset-specific payment policies, and register the C address
+as a verified recipient. The dashboard shows the Smart Account address and live
+USD balance. The fiat ledger and Classic wallet remain private.
 
-For Stellar accounts, opening automatically provisions a dedicated Classic wallet,
-deploys the Smart contract, installs its payment policy, and registers the contract
-as a verified recipient. The Classic wallet holds testnet XLM for reserves and fees;
-the dashboard shows only the Smart contract's balance and C address.
+**Traditional Add funds** accepts demo USD with up to two decimal places:
 
-**Add funds** accepts an XLM amount and automatically:
+1. Credit hardcoded, simulated USD in the account's private fiat ledger.
+2. The demo anchor consumes that credit and issues the same amount of testnet USD
+   into the mapped Classic wallet, creating its trustline automatically.
+3. Transfer the USD tokens through their Stellar Asset Contract into the mapped Smart Account.
 
-1. Deposits that amount into the account's mapped Classic wallet using the testnet funding provider.
-2. Transfers it into the mapped Smart contract.
+The USD issuer key is generated once and encrypted in the database's custody vault.
+Its public issuer address and token contract are available in `/api/network`.
+This token represents fake demo dollars, not USDC or redeemable money. The anchor
+is a local demo adapter; it does not connect to a bank or implement a hosted SEP-24 service.
 
-Both transactions are persisted independently before broadcast. Repeating the same
-request resumes an interrupted operation without depositing or transferring twice.
-Only confirmed funding is reported as successful. The provider uses Friendbot-funded
-source wallets and accepts amounts within their available testnet allowance.
+**Stellar Add funds** also deposits demo USD tokens into the mapped Classic wallet,
+then transfers them into Smart. Both account options accept USD amounts with up to
+two decimal places. The Classic wallet retains XLM privately for reserves and fees.
 
-Stellar payments transfer XLM from one Smart contract to another verified Smart
-contract. Classic G addresses cannot be used as payment recipients. XLM amounts
-accept up to seven decimal places. The UI displays XLM amounts with three decimal
-places and thousands separators; nonzero amounts below 0.001 display as
-`<0.001 XLM`. Stored amounts and payment inputs retain full precision.
+Both funding transactions persist before broadcast. Repeating an unchanged request
+resumes interrupted funding without issuing fiat, depositing tokens or forwarding
+them twice. Only confirmed forwarding creates a successful funding receipt.
 
-The **Activity** tab shows funding and payments. Traditional entries are marked as
-simulated; Stellar entries include transaction hashes and explorer links.
-The dashboard refreshes balances when you return to its tab and every 15 seconds.
-The API rejects payments back to the sending account for both payment methods;
-the mandate preview flags that recipient before submission.
+All payments transfer from a Smart C address to another verified Smart C address.
+Both account options fund, receive and spend the same demo USD token. The dashboard
+shows only the actual on-chain USD balance. Smart Account addresses start masked;
+**Show Smart Account address** reveals them, and **Hide Smart Account address**
+masks them again. **Copy Smart Account address** works while masked. Mandates and payments always use USD,
+with no currency selector. Classic G addresses are not payment recipients.
+Payments and mandate limits retain seven decimal places; deposits accept two.
+Existing XLM remains on chain and is not converted into or displayed as USD.
+
+The **Activity** tab shows confirmed funding and payment transactions with explorer
+links. Older local demo receipts remain marked as historical simulated activity.
+The dashboard refreshes when returning to its tab and every 15 seconds.
+Payments back to the source account are rejected.
 
 ## Mandates and third-party payments
 
-A mandate grants a person or agent spending access to an existing account.
-Creating one does not open another account or create another balance.
+There is one mandate flow for both account options. A mandate grants a person or
+agent spending access to an existing Smart Account's USD balance.
+Creating one does not open an account or create another balance.
 
-1. Open **Mandates** and choose Traditional or Stellar payment.
-2. Select a verified source account matching that method.
-3. Enter the holder, limit, period and expiry.
-4. Use **Show mandate** to reveal and save the secret mandate ID. The Pay link contains only the payment method.
+1. Open **Mandates** and select a verified source account.
+2. Enter the holder, USD limit, rolling period and expiry.
+3. Use **Show mandate** to reveal and save the secret mandate ID. The Pay link is simply `/pay`.
 
-Traditional mandates enforce limits in fixed 24-hour, 7-day or 30-day periods in
-the service. Stellar mandates install an on-chain signer with a rolling spending
-limit, ledger expiry and verified-recipient policy. The API also checks wall-clock
-expiry. Several mandates can share an account, each with its own allowance.
-Revocation disables the secret mandate ID immediately; a pending on-chain revocation remains
-visible and retryable.
+Every new mandate installs an on-chain signer and an asset-scoped contract rule,
+with a rolling spending limit, ledger expiry and verified-recipient policy.
+The API also checks wall-clock expiry. Several mandates can share an account,
+each with its own allowance. A USD mandate cannot authorize an XLM transfer.
+Revocation disables the secret ID immediately; pending on-chain revocation remains
+visible and retryable until the rule is removed.
 
 The holder opens `/pay` without an owner login, enters the secret mandate ID and
-payment details, and chooses **Check mandate & seller** before **Make payment**. Use the
-recipient's demo reference for Traditional payments or C address for Stellar payments.
-The Pay link never contains the secret mandate ID. The Pay page always masks it
-as a password and has no reveal control. The dashboard masks it until the owner
-presses **Show mandate**, and clears the revealed value when **Hide mandate** is pressed.
+the seller's Smart Account C address copied from their dashboard, then checks and
+submits the payment. The mandate determines the buyer's source account and currency;
+there is no payment-method selector. The recipient's display name does not establish verification.
 
-An invalid secret mandate ID, incompatible payment methods, unverified recipients, exceeded
-limits, expiry, revocation and insufficient funds decline payment. Unchanged
-retries reuse the same request ID. Pending blockchain transactions are shown as
-pending rather than paid.
+The secret ID is a bearer credential. It never appears in links or receipts.
+The Pay page always masks it. The owner's dashboard reveals it only after
+**Show mandate**, and clears it after **Hide mandate**. **Copy mandate ID** retrieves
+the secret through the owner-authenticated endpoint and copies it without revealing
+it in the field. Copy buttons work while masked or visible.
+Invalid IDs, unverified recipients, limits, expiry, revocation and insufficient
+funds decline payment. Unchanged retries reuse their request ID. Pending blockchain
+transactions are reported as pending until confirmed.
+
+Existing local traditional accounts are upgraded when their workspace loads:
+their old demo balances are anchored exactly once into testnet USD, with recovery
+across restarts. Old service-only mandates are retained as revoked records and must
+be recreated; their prior permissions are not silently renewed. Existing Stellar
+accounts retain their addresses. Older XLM mandate rules retain their original
+asset scope and must be replaced with a new USD mandate to pay through the app.
 
 ## Seller verification
 
@@ -119,8 +137,8 @@ checks that same registry during on-chain authorization. A mandate additionally
 checks its spending limit. Revoking a recipient's registry entry blocks later payments.
 
 The prototype automatically attests accounts it opens. It does not perform KYC,
-business verification or domain-ownership verification. Traditional verification is
-only a local demo flag.
+business verification or domain-ownership verification. Both account options use
+this same registry verification.
 
 ## Configuration and storage
 
@@ -128,7 +146,7 @@ only a local demo flag.
 
 | Setting | Purpose |
 |---|---|
-| `PAYMENTS_CHAIN_DB` | Workspace, demo-bank ledger, encrypted custody vault and transaction journal; defaults to `workspace.sqlite` in the API directory |
+| `PAYMENTS_CHAIN_DB` | Workspace, private demo fiat/anchor journal, encrypted custody vault and transaction journal; defaults to `workspace.sqlite` in the API directory |
 | `PAYMENTS_ENCRYPTION_KEY` | 32-byte hex custody key generated by `setup:payments` |
 | `PAYMENTS_RPC_URL` | Stellar testnet RPC endpoint |
 | `PAYMENTS_HORIZON_URL` | Testnet account activation lookup |
@@ -150,7 +168,7 @@ AES-256-GCM. Passwords use salted scrypt hashes; sessions and mandate IDs are
 authenticated by their hashes. Ordinary workspace, preview and payment responses
 exclude the secret ID. Records and receipts use a separate non-secret `reference`
 for management and auditing. The on-chain rule ID and signing mechanism are unchanged.
-Demo-bank mutations commit atomically in SQLite. Stellar envelopes persist before
+Demo fiat and anchor journal mutations commit atomically in SQLite. Stellar envelopes persist before
 broadcast and retain their original transaction IDs on retries.
 
 Keep the encryption key with its database. Changing keys or contract configuration
@@ -172,8 +190,10 @@ workspace schema and does not migrate other database layouts.
 | `POST /api/pay/preview`, `/api/pay` | Third-party checks and payment using the secret `mandateId` in the JSON body |
 | `GET /api/network`, `/api/health` | Testnet metadata and service status |
 
-Traditional successes have `settlement: "traditional-demo"` and a demo receipt ID.
-Stellar successes have `settlement: "stellar-testnet"`, a `txHash` and explorer link.
+All new funding and payment successes have `settlement: "stellar-testnet"`, a
+`txHash` and explorer link. All new receipts use USD.
+Mandate creation and payments require no currency input; explicit non-USD
+requests are rejected. Public Pay requests derive the buyer's account from the mandate.
 Public Pay endpoints require the secret `mandateId` in the JSON body. They do not
 use an owner cookie or a separate Authorization Bearer token. The owner-authenticated
 creation response is `{ mandate, mandateId }`; its `mandate.reference` is not a
@@ -188,8 +208,8 @@ pnpm build
 pnpm test:contracts
 ```
 
-Browser checks verify masking, explicit dashboard reveal, and payment without a
-separate credential. Install Chromium once, then run them:
+Browser checks verify masking, explicit dashboard reveal, copying masked IDs and
+addresses, and payment without a separate credential. Install Chromium once, then run them:
 
 ```bash
 pnpm --filter @mandate/web exec playwright install chromium
@@ -203,8 +223,10 @@ mandate limits and revocation with fresh wallets and testnet funds:
 pnpm test:chain
 ```
 
-Public verification receipts are in
+Current USD anchor and unified mandate verification receipts are in
+[unified-mandate-verification.json](docs/unified-mandate-verification.json).
+Earlier XLM-only verification receipts are in
 [stellar-account-verification.json](docs/stellar-account-verification.json).
 Verification of payments using only the secret mandate ID is in
 [secret-mandate-verification.json](docs/secret-mandate-verification.json).
-Traditional banking is simulated and Stellar payments use testnet only.
+Fiat funding is simulated; all new payment settlement uses Stellar testnet only.
