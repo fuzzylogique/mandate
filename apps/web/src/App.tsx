@@ -5,13 +5,13 @@ import { AccountForms, type AccountAction } from "./AccountForms.tsx";
 import { AccountOpeningForm } from "./AccountOpeningForm.tsx";
 import { CreateMandateForm } from "./CreateMandateForm.tsx";
 import { PayPage } from "./PayPage.tsx";
+import { SecretMandateId } from "./SecretMandateId.tsx";
 import { SignIn } from "./SignIn.tsx";
-import { initials } from "./format.ts";
+import { initials, money, formatValue } from "./format.ts";
 import { Logo, PlusIcon } from "./icons.tsx";
 
 const methodName = (account: SpendingAccount) => account.rail === "traditional" ? "Traditional account" : "Stellar account";
-const money = (amount: string, currency: string) => `${amount} ${currency}`;
-const payLink = (mandate: AccountMandate) => `/pay?mandateId=${encodeURIComponent(mandate.id)}&rail=${mandate.rail ?? "blockchain"}`;
+const payLink = (mandate: AccountMandate) => `/pay?rail=${mandate.rail ?? "blockchain"}`;
 
 export function App() {
   return window.location.pathname.replace(/\/$/, "") === "/pay" ? <PayPage /> : <WorkspaceApp />;
@@ -44,7 +44,17 @@ function WorkspaceApp() {
   }, []);
   useEffect(() => {
     const load = () => { void api.network().then(data => setNetwork(data.network)).catch(() => undefined); void refresh(); };
-    load(); const timer = setInterval(load, 15_000); return () => clearInterval(timer);
+    const onFocus = () => { void refresh(); };
+    const onVisibility = () => { if (document.visibilityState === "visible") void refresh(); };
+    load();
+    const timer = setInterval(load, 15_000);
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [refresh]);
   const logout = async () => {
     setBusy(true);
@@ -87,9 +97,9 @@ function WorkspaceApp() {
       </div>)}
       {page === "mandates" && <div className="mandates-layout"><CreateMandateForm workspace={workspace} onDone={refresh} /><section className="mandates-list-section"><h2>Your mandates</h2>{workspace.mandates.length === 0 ? <p className="card empty">No mandates yet. Choose a payment method and source account to create one.</p> : <ul className="mandate-card-list">{workspace.mandates.map(mandate => {
         const source = workspace.accounts.find(account => account.id === mandate.accountId);
-        return <li className="card mandate-card" key={mandate.id}><div className="mandate-top"><h3>{mandate.name}</h3><span className={`status ${mandate.status === "active" ? "is-on" : ""}`}>{mandate.chainRevocationPending ? "Revocation pending" : mandate.status}</span></div><p className="pill mandate-method">{mandate.rail === "traditional" ? "Traditional payment · demo" : "Stellar account payment · blockchain"}</p><p className="muted">Source: {source?.name ?? mandate.accountId}</p><p className="parent-amount">{mandate.spent} / {mandate.limit} {source?.currency}</p><p className="muted">Per {mandate.period === "month" ? "30 days" : mandate.period === "week" ? "7 days" : "24 hours"} · expires {new Date(mandate.expiresAt).toLocaleDateString()}</p><p className="muted">Holder: {mandate.recipient}</p><div className="account-buttons"><a className="button" href={payLink(mandate)}>Open Pay page ↗</a>{source && <button className="button" onClick={() => setAction({ kind: "fund", account: source })}>Fund source account</button>}</div><CopyValue value={mandate.id} label="Copy mandate ID" />{(mandate.status === "active" || mandate.chainRevocationPending) && (confirmRevoke === mandate.id ? <div className="confirm"><span>Revoke access?</span><button className="button is-danger" disabled={busy} onClick={() => void revoke(mandate.id)}>Revoke</button><button className="button" disabled={busy} onClick={() => setConfirmRevoke(null)}>Cancel</button></div> : <button className="button is-quiet" onClick={() => setConfirmRevoke(mandate.id)}>{mandate.chainRevocationPending ? "Retry revocation" : "Revoke mandate"}</button>)}</li>;
+        return <li className="card mandate-card" key={mandate.reference}><div className="mandate-top"><h3>{mandate.name}</h3><span className={`status ${mandate.status === "active" ? "is-on" : ""}`}>{mandate.chainRevocationPending ? "Revocation pending" : mandate.status}</span></div><p className="pill mandate-method">{mandate.rail === "traditional" ? "Traditional payment · demo" : "Stellar account payment · blockchain"}</p><p className="muted">Source: {source?.name ?? mandate.accountId}</p><p className="parent-amount">{formatValue(mandate.spent, source?.currency)} / {money(mandate.limit, source?.currency)}</p><p className="muted">Per {mandate.period === "month" ? "30 days" : mandate.period === "week" ? "7 days" : "24 hours"} · expires {new Date(mandate.expiresAt).toLocaleDateString()}</p><p className="muted">Holder: {mandate.recipient}</p><div className="account-buttons"><a className="button" href={payLink(mandate)}>Open Pay page ↗</a>{source && <button className="button" onClick={() => setAction({ kind: "fund", account: source })}>Fund source account</button>}</div><SecretMandateId key={mandate.reference} reference={mandate.reference} />{(mandate.status === "active" || mandate.chainRevocationPending) && (confirmRevoke === mandate.reference ? <div className="confirm"><span>Revoke access?</span><button className="button is-danger" disabled={busy} onClick={() => void revoke(mandate.reference)}>Revoke</button><button className="button" disabled={busy} onClick={() => setConfirmRevoke(null)}>Cancel</button></div> : <button className="button is-quiet" onClick={() => setConfirmRevoke(mandate.reference)}>{mandate.chainRevocationPending ? "Retry revocation" : "Revoke mandate"}</button>)}</li>;
       })}</ul>}
-        {workspace.shared.length > 0 && <><h2 className="shared-heading">Shared with you</h2><ul className="mandate-card-list">{workspace.shared.map(({ account, mandate, ownerName }) => <li className="card mandate-card" key={mandate.id}><h3>{mandate.name}</h3><p className="muted">{account.name} · shared by {ownerName}</p><p>{mandate.spent} / {mandate.limit} {account.currency}</p><button className="button" disabled={mandate.status !== "active"} onClick={() => setAction({ kind: "pay", account, mandate })}>Make payment</button></li>)}</ul></>}
+        {workspace.shared.length > 0 && <><h2 className="shared-heading">Shared with you</h2><ul className="mandate-card-list">{workspace.shared.map(({ account, mandate, ownerName }) => <li className="card mandate-card" key={mandate.reference}><h3>{mandate.name}</h3><p className="muted">{account.name} · shared by {ownerName}</p><p>{formatValue(mandate.spent, account.currency)} / {money(mandate.limit, account.currency)}</p><button className="button" disabled={mandate.status !== "active"} onClick={() => setAction({ kind: "pay", account, mandate })}>Make payment</button></li>)}</ul></>}
       </section></div>}
       {page === "activity" && <Activity items={workspace.activity} accounts={workspace.accounts} />}
       <footer className="workspace-footer">Traditional banking is a hardcoded demo. Stellar accounts use Stellar testnet. A mandate grants spending access to an existing account.</footer>
@@ -107,5 +117,5 @@ function CopyValue({ value, label }: { value: string; label: string }) {
   return <button className="button is-quiet" onClick={() => void navigator.clipboard.writeText(value).then(() => setCopied(true)).catch(() => setCopied(false))}>{copied ? "Copied" : label}</button>;
 }
 function Activity({ items, accounts }: { items: PaymentEntry[]; accounts: SpendingAccount[] }) {
-  return <section className="card">{items.length === 0 ? <p className="empty">Funding and payments will appear here.</p> : <ul className="ledger-list">{items.map(entry => <li key={entry.id}><span className="ledger-symbol" aria-hidden="true">{entry.kind === "funding" ? "+" : "↗"}</span><div className="ledger-main"><strong>{entry.kind === "funding" ? "Account funded" : entry.reference}</strong><p className="muted">{accounts.find(account => account.id === entry.accountId)?.name ?? "Previous account activity"}{entry.kind === "payment" ? ` → ${entry.destination}` : ""}</p><small className="muted">{new Date(entry.createdAt).toLocaleString()} · {entry.settlement === "traditional-demo" ? "Banking demo · simulated" : "Stellar testnet"}{entry.mandateId ? " · Via mandate" : ""}</small>{entry.explorerUrl && <p><a className="transaction-link" href={entry.explorerUrl} target="_blank" rel="noreferrer">View transaction ↗</a></p>}</div><strong className="ledger-amount">{money(entry.amount, entry.currency)}</strong></li>)}</ul>}</section>;
+  return <section className="card">{items.length === 0 ? <p className="empty">Funding and payments will appear here.</p> : <ul className="ledger-list">{items.map(entry => <li key={entry.id}><span className="ledger-symbol" aria-hidden="true">{entry.kind === "funding" ? "+" : "↗"}</span><div className="ledger-main"><strong>{entry.kind === "funding" ? "Account funded" : entry.reference}</strong><p className="muted">{accounts.find(account => account.id === entry.accountId)?.name ?? "Previous account activity"}{entry.kind === "payment" ? ` → ${entry.destination}` : ""}</p><small className="muted">{new Date(entry.createdAt).toLocaleString()} · {entry.settlement === "traditional-demo" ? "Banking demo · simulated" : "Stellar testnet"}{entry.mandateReference ? " · Via mandate" : ""}</small>{entry.explorerUrl && <p><a className="transaction-link" href={entry.explorerUrl} target="_blank" rel="noreferrer">View transaction ↗</a></p>}</div><strong className="ledger-amount">{money(entry.amount, entry.currency)}</strong></li>)}</ul>}</section>;
 }

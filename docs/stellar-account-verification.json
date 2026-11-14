@@ -1,26 +1,31 @@
 {
+  "fundingTransactions": {
+    "amount": "5",
+    "depositTxHash": "0fdfa02a07474d2c660cd89d8c363a0df7137c5fcbffcacdbc90c64aef444d75",
+    "forwardingTxHash": "faecab37eb0640cb5c915de63fb34330b017489a48b39a15beec27dceb4910c4"
+  },
   "network": "stellar:testnet",
   "policy": "CDUOUHZNVEWW6J4ELPK6DGHGO7RGBCQ54TNSE6AOTLUTCL5GYE7FJHGQ",
   "privatePairs": [
     {
-      "accountId": "STELLAR_427280bb41ecf69674bc6dfdc6a66f49",
-      "classicAddress": "GDNQRIH3APQJIWPT3FPYUE6TEZRER3OHSMVXCWXDBK23D3CHDK2IE2VZ"
+      "accountId": "STELLAR_2a0eaeba40967a7c9397ea7604bc4380",
+      "classicAddress": "GBFAYXQA3EGVKIRSKJI2G7ELS2OZNJRTIZ4S3QEE2ELHSNE4NIFQ5TRD"
     },
     {
-      "accountId": "STELLAR_831394616284a8ff7f3b7eddff91cdbf",
-      "classicAddress": "GA5PPQVOIMSL3C275X7VSW2NCIZGCWOMO3DTAJCB5YMQTLXDQQHFYT3Y"
+      "accountId": "STELLAR_d95fb9dd62ea791b751f4f0cf15228c0",
+      "classicAddress": "GD334PPQXHAZPDOJDHC7POVESVUKHIGZK3JGDXD6SF5COR3OPTYKX3CR"
     }
   ],
   "traditionalDemo": {
-    "source": "BANK_DEMO_E77DD221260DC4C687C5",
-    "recipient": "BANK_DEMO_01B8E80809D0BB382F0F",
-    "paymentId": "demo_ef4a7214-6c52-461b-8a01-17e182f65c14"
+    "source": "BANK_DEMO_E46FD6A1650B8AE44808",
+    "recipient": "BANK_DEMO_95F012AC9FAAFF938052",
+    "paymentId": "demo_f3634fea-fb96-404a-b21c-14fa52950326"
   },
-  "smart": "CCUYNCO4ENUJEZNYOSNT2GH4K3UFOZJA77NFEMAJSBUAWFNBAPTHXFYT",
-  "seller": "CDQ3LVW5GHSARYCM5YQHJJTG7FP3SYAJCIT4IVVK45ZD6N6R72GIFXH4",
+  "smart": "CBW2F3I4K4XI7ZP4UDNJESUXKQU2ATTYQXALYYURJWG3MRZJM6MFZSQ2",
+  "seller": "CBSOWF4WTN6S2WDE6Y3QBQFFPA2JDBNKWSKKRTHYNCK63GNA22BDSITS",
   "mandate": {
-    "id": "ee8f3a9ecb23d4f8236b6f698e017139",
-    "account": "CCUYNCO4ENUJEZNYOSNT2GH4K3UFOZJA77NFEMAJSBUAWFNBAPTHXFYT"
+    "id": "86cc6f493966c68daacddaa8e2f3cd2c",
+    "account": "CBW2F3I4K4XI7ZP4UDNJESUXKQU2ATTYQXALYYURJWG3MRZJM6MFZSQ2"
   },
   "checks": [
     "login holds no funds",
@@ -38,36 +43,31 @@
   "receipts": [
     {
       "step": "Smart opening",
-      "txHash": "1eec51240a54a1c4c6afaa6d1a941274a94f94a7d95ff1c2355d0d7c2023d438"
+      "txHash": "adb13ba57953fce7ab355e1732a892bc41e358d3f264932447aad7ff76c553b0"
     },
     {
       "step": "Smart verification",
-      "txHash": "1ae02ba4dcc4a29e5a7e4fd593b95dad595cec880e5681837cd45bdd875c94ac"
+      "txHash": "8d7bf51c0f973739708b72668149092a293c8ae5ca0f5882c0896b627c041222"
     },
     {
       "step": "Seller opening",
-      "txHash": "ee531459c681051a1aa2610184189317b40cde350935c4e7f953467ac86cdf29"
+      "txHash": "df549fe107a9aba403ad24d25ace6dcb912ed5711ed9768c01dbb09417c2f769"
     },
     {
       "step": "Seller verification",
-      "txHash": "89607faa852b9f69ccd97643cc29a10d701601aaae6d3400d61aa557699fcfae"
+      "txHash": "f02ff60ab82b5fc4cf08238e7ddf64e72490825c7ab1aacd35c2a2f2e5ffc31e"
     },
     {
       "step": "Fund smart",
-      "txHash": "615658395a9c1de6b457c46655024c92bc58cee0b0ef2bcd972fe84a329138ca"
+      "txHash": "faecab37eb0640cb5c915de63fb34330b017489a48b39a15beec27dceb4910c4"
     },
     {
       "step": "Smart-to-Smart payment",
-      "txHash": "60674e7b8655cc17c2b69540e0838a302e3d7bb3955acccfc30152163a0ed6a0"
+      "txHash": "38de2ac4147dcfdf4802c8e47b259517686291b627166086be06cbba41d44520"
     },
     {
       "step": "Third-party /pay payment",
-      "txHash": "ed4af872124ae7363c38a197ddaa05b7cffcecab02b8915a53f2818185dbae8f"
+      "txHash": "f820b809a0cdb0f018253a72fd8453aed53edffa1e29e3696aeb94485c49b073"
     }
-  ],
-  "fundingTransactions": {
-    "amount": "5",
-    "depositTxHash": "703861f843ac03ad0770281001a3c9989773ab8c2f005fd6310f188aa15e2839",
-    "forwardingTxHash": "615658395a9c1de6b457c46655024c92bc58cee0b0ef2bcd972fe84a329138ca"
-  }
+  ]
 }

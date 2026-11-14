@@ -33,7 +33,7 @@ export function amount(value: unknown): bigint {
   return units;
 }
 export interface CustomerRecord extends Customer { password: string }
-export interface MandateRecord extends AccountMandate { tokenHash?: string }
+export interface MandateRecord extends Omit<AccountMandate, "reference"> { id: string; mandateIdHash?: string }
 export function validateMandateInput(body: Record<string, unknown>): Pick<AccountMandate, "name" | "recipientType" | "recipient" | "limit" | "period" | "expiresAt"> {
   requireThat(body.recipientType === "person" || body.recipientType === "agent", 400, "Choose a person or agent");
   requireThat(body.period === "day" || body.period === "week" || body.period === "month", 400, "Choose a spending period");
@@ -45,7 +45,7 @@ export function validateMandateInput(body: Record<string, unknown>): Pick<Accoun
     limit: decimal(amount(body.limit)), period: body.period, expiresAt: new Date(expiry).toISOString(),
   };
 }
-export interface EntryRecord extends PaymentEntry { ownerId: string; actorId: string; requestId?: string }
+export interface EntryRecord extends Omit<PaymentEntry, "mandateReference"> { mandateId: string | null; ownerId: string; actorId: string; requestId?: string }
 /** Private custody records; never included in a workspace or account response. */
 export interface StellarAccountPair { accountId: string; classicWalletId: string }
 export interface State {
@@ -65,10 +65,10 @@ export function mandateSpent(state: State, mandate: MandateRecord): bigint {
   return state.entries.filter(e => e.kind === "payment" && e.mandateId === mandate.id && Date.parse(e.createdAt) >= start)
     .reduce((sum, e) => sum + BigInt(toBaseUnits(e.amount)), 0n);
 }
-export type Actor = { kind: "customer"; id: string } | { kind: "agent"; id: string; mandateId: string };
+export type Actor = { kind: "customer"; id: string } | { kind: "mandate"; id: string; mandateReference: string };
 const emptyState = (): State => ({ schemaVersion: 1, customers: [], accounts: [], stellarPairs: [], mandates: [], entries: [], sessions: [] });
 const publicCustomer = ({ id, name, email }: CustomerRecord): Customer => ({ id, name, email });
-const publicEntry = ({ ownerId: _owner, actorId: _actor, requestId: _request, ...entry }: EntryRecord): PaymentEntry => entry;
+export const publicEntry = ({ ownerId: _owner, actorId: _actor, requestId: _request, mandateId, ...entry }: EntryRecord): PaymentEntry => ({ ...entry, mandateReference: mandateId });
 
 /** Local authentication, workspace ownership and the transactional demo-bank ledger. */
 export class WorkspaceStore {
@@ -81,6 +81,13 @@ export class WorkspaceStore {
       this.db.close();
       throw new ServiceError(503, "This database uses an unsupported workspace layout. Choose a new PAYMENTS_CHAIN_DB.");
     }
+    if (this.read().mandates.some(mandate => "tokenHash" in mandate)) this.update(state => {
+      for (const mandate of state.mandates) {
+        const previous = mandate as MandateRecord & { tokenHash?: string };
+        if (previous.tokenHash) mandate.mandateIdHash = previous.tokenHash;
+        delete previous.tokenHash;
+      }
+    });
   }
   close() { this.db.close(); }
   /** Internal repository access, shared with the chain-backed service. Never exposed over HTTP. */
@@ -131,20 +138,22 @@ export class WorkspaceStore {
     requireThat(found && timingSafeEqual(actual, Buffer.from(expected!, "hex")), 401, "Email or password is incorrect");
     return this.update(state => this.issueSession(state, state.customers.find(c => c.id === found.id)!));
   }
-  authenticate(token: string, agent = false): Actor {
+  authenticateMandate(value: unknown): Actor {
+    requireThat(typeof value === "string" && value.trim().length >= 32 && value.trim().length <= 128, 401, "Enter a valid secret mandate ID");
+    const mandate = this.read().mandates.find(m => m.mandateIdHash === hash(value.trim()));
+    requireThat(mandate && mandate.status === "active" && mandate.expiresAt > now(), 401, "Mandate ID is invalid, expired, or revoked");
+    return { kind: "mandate", id: mandate.id, mandateReference: mandate.id };
+  }
+  authenticate(token: string): Actor {
     const state = this.read();
-    if (agent) {
-      const mandate = state.mandates.find(m => m.tokenHash === hash(token));
-      requireThat(mandate && mandate.status !== "revoked" && mandate.expiresAt > now(), 401, "Agent mandate is invalid, expired, or revoked");
-      return { kind: "agent", id: mandate.id, mandateId: mandate.id };
-    }
     const session = state.sessions.find(s => s.hash === hash(token) && s.expiresAt > now());
     requireThat(session, 401, "Please sign in");
     return { kind: "customer", id: session.customerId };
   }
   logout(token: string) { this.update(state => { state.sessions = state.sessions.filter(s => s.hash !== hash(token)); }); }
-  private mandateView(state: State, mandate: MandateRecord): AccountMandate {
-    const { tokenHash: _secret, ...view } = mandate;
+  mandateView(state: State, mandate: MandateRecord): AccountMandate {
+    const { mandateIdHash: _secret, id, ...details } = mandate;
+    const view: AccountMandate = { ...details, reference: id };
     view.spent = decimal(mandateSpent(state, mandate));
     view.status = mandate.status === "revoked" ? "revoked" : mandate.expiresAt <= now() ? "expired" : "active";
     return view;
@@ -159,7 +168,7 @@ export class WorkspaceStore {
       mandate: this.mandateView(state, m),
       ownerName: state.customers.find(c => c.id === state.accounts.find(a => a.id === m.accountId)!.ownerId)!.name,
     }));
-    const sharedIds = new Set(shared.map(s => s.mandate.id));
+    const sharedIds = new Set(shared.map(s => s.mandate.reference));
     return {
       mode: "stellar-testnet", customer: publicCustomer(customer), accounts,
       mandates: state.mandates.filter(m => owned.has(m.accountId)).map(m => this.mandateView(state, m)), shared,
@@ -173,7 +182,6 @@ export class WorkspaceStore {
       const customer = this.customer(state, actor);
       requireThat(state.accounts.some(a => a.id === mandate.accountId && a.ownerId === customer.id), 404, "Account not found");
       mandate.status = "revoked";
-      delete mandate.tokenHash;
     });
   }
 }

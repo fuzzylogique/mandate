@@ -64,10 +64,15 @@ source wallets and accepts amounts within their available testnet allowance.
 
 Stellar payments transfer XLM from one Smart contract to another verified Smart
 contract. Classic G addresses cannot be used as payment recipients. XLM amounts
-accept up to seven decimal places.
+accept up to seven decimal places. The UI displays XLM amounts with three decimal
+places and thousands separators; nonzero amounts below 0.001 display as
+`<0.001 XLM`. Stored amounts and payment inputs retain full precision.
 
 The **Activity** tab shows funding and payments. Traditional entries are marked as
 simulated; Stellar entries include transaction hashes and explorer links.
+The dashboard refreshes balances when you return to its tab and every 15 seconds.
+The API rejects payments back to the sending account for both payment methods;
+the mandate preview flags that recipient before submission.
 
 ## Mandates and third-party payments
 
@@ -77,21 +82,23 @@ Creating one does not open another account or create another balance.
 1. Open **Mandates** and choose Traditional or Stellar payment.
 2. Select a verified source account matching that method.
 3. Enter the holder, limit, period and expiry.
-4. Save the displayed payment credential, mandate ID and Pay link.
+4. Use **Show mandate** to reveal and save the secret mandate ID. The Pay link contains only the payment method.
 
 Traditional mandates enforce limits in fixed 24-hour, 7-day or 30-day periods in
 the service. Stellar mandates install an on-chain signer with a rolling spending
 limit, ledger expiry and verified-recipient policy. The API also checks wall-clock
 expiry. Several mandates can share an account, each with its own allowance.
-Revocation blocks service access immediately; a pending on-chain revocation remains
+Revocation disables the secret mandate ID immediately; a pending on-chain revocation remains
 visible and retryable.
 
-The holder opens `/pay` without an owner login, enters the credential and payment
-details, and chooses **Check mandate & seller** before **Make payment**. Use the
+The holder opens `/pay` without an owner login, enters the secret mandate ID and
+payment details, and chooses **Check mandate & seller** before **Make payment**. Use the
 recipient's demo reference for Traditional payments or C address for Stellar payments.
-The Pay link contains the mandate ID and method, never its secret credential.
+The Pay link never contains the secret mandate ID. The Pay page always masks it
+as a password and has no reveal control. The dashboard masks it until the owner
+presses **Show mandate**, and clears the revealed value when **Hide mandate** is pressed.
 
-Wrong credentials, incompatible payment methods, unverified recipients, exceeded
+An invalid secret mandate ID, incompatible payment methods, unverified recipients, exceeded
 limits, expiry, revocation and insufficient funds decline payment. Unchanged
 retries reuse the same request ID. Pending blockchain transactions are shown as
 pending rather than paid.
@@ -138,8 +145,11 @@ only a local demo flag.
 | `RECEIPTS_PORT` | Payments API port; defaults to `4022` |
 | `NODE_ENV` | Set to `production` for Secure session cookies; requires HTTPS |
 
-Signing keys and cached command responses are encrypted with AES-256-GCM. Passwords
-use salted scrypt hashes; sessions and payment credentials are stored as hashes.
+Signing keys, secret mandate IDs and cached command responses are encrypted with
+AES-256-GCM. Passwords use salted scrypt hashes; sessions and mandate IDs are
+authenticated by their hashes. Ordinary workspace, preview and payment responses
+exclude the secret ID. Records and receipts use a separate non-secret `reference`
+for management and auditing. The on-chain rule ID and signing mechanism are unchanged.
 Demo-bank mutations commit atomically in SQLite. Stellar envelopes persist before
 broadcast and retain their original transaction IDs on retries.
 
@@ -156,14 +166,18 @@ workspace schema and does not migrate other database layouts.
 | `POST /api/accounts/open` | Open with `type: "traditional"` or `"stellar"`, name and request ID |
 | `POST /api/accounts/:id/funding` | Add funds to that account; requires amount and request ID |
 | `POST /api/mandates` | Create a mandate on an existing source account |
-| `DELETE /api/mandates/:id` | Revoke a mandate |
+| `POST /api/mandates/:reference/reveal` | Owner-only retrieval of the secret mandate ID for Show mandate |
+| `DELETE /api/mandates/:reference` | Revoke a mandate using its non-secret record reference |
 | `POST /api/payments` | Owner or delegate payment |
-| `POST /api/pay/preview`, `/api/pay` | Third-party checks and payment with an Authorization Bearer credential |
+| `POST /api/pay/preview`, `/api/pay` | Third-party checks and payment using the secret `mandateId` in the JSON body |
 | `GET /api/network`, `/api/health` | Testnet metadata and service status |
 
 Traditional successes have `settlement: "traditional-demo"` and a demo receipt ID.
 Stellar successes have `settlement: "stellar-testnet"`, a `txHash` and explorer link.
-Owner cookies do not replace the payment credential on the public Pay endpoints.
+Public Pay endpoints require the secret `mandateId` in the JSON body. They do not
+use an owner cookie or a separate Authorization Bearer token. The owner-authenticated
+creation response is `{ mandate, mandateId }`; its `mandate.reference` is not a
+payment authorization. Secrets are never put in links, receipts or on-chain arguments.
 
 ## Checks
 
@@ -172,6 +186,14 @@ pnpm typecheck
 pnpm test
 pnpm build
 pnpm test:contracts
+```
+
+Browser checks verify masking, explicit dashboard reveal, and payment without a
+separate credential. Install Chromium once, then run them:
+
+```bash
+pnpm --filter @mandate/web exec playwright install chromium
+pnpm test:ui
 ```
 
 To verify real contract deployment, automatic funding, Smart-to-Smart payments,
@@ -183,4 +205,6 @@ pnpm test:chain
 
 Public verification receipts are in
 [stellar-account-verification.json](docs/stellar-account-verification.json).
+Verification of payments using only the secret mandate ID is in
+[secret-mandate-verification.json](docs/secret-mandate-verification.json).
 Traditional banking is simulated and Stellar payments use testnet only.

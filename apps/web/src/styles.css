@@ -576,3 +576,5 @@ main > .workspace-note { margin-top: -16px; }
 .shared-heading { margin-top: 20px; }
 @media (max-width: 800px) { .mandates-layout { grid-template-columns: 1fr; } }
 @media (max-width: 600px) { .two-choices { grid-template-columns: 1fr; } .account-opening-summary > div { display: grid; gap: 3px; } .account-opening-form { padding: 20px; } .topbar { flex-wrap: wrap; } .topbar-side { flex-wrap: wrap; } }
+
+.secret-mandate { display: grid; gap: 10px; min-width: 0; }

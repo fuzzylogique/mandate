@@ -2,7 +2,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { formatAmount, toBaseUnits } from "@mandate/shared";
 import type { PaymentEntry, SpendingAccount } from "@mandate/shared";
-import { WorkspaceStore, amount, mandateSpent, requireThat, text, type Actor, type EntryRecord, type State } from "./store.ts";
+import { WorkspaceStore, amount, mandateSpent, requireThat, text, type Actor, type EntryRecord, type State, publicEntry } from "./store.ts";
 
 const decimal = (units: bigint) => formatAmount(units.toString());
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -34,8 +34,7 @@ export class TraditionalBankingDemo {
   private entry(state: State, input: Omit<EntryRecord, "id" | "createdAt" | "settlement">): PaymentEntry {
     const entry: EntryRecord = { ...input, id: `demo_${randomUUID()}`, createdAt: new Date().toISOString(), settlement: "traditional-demo" };
     state.entries.push(entry);
-    const { ownerId: _owner, actorId: _actor, requestId: _request, ...view } = entry;
-    return view;
+    return publicEntry(entry);
   }
   open(actor: Actor, body: Record<string, unknown>): SpendingAccount {
     const name = text(body.name, "Account name");
@@ -70,15 +69,15 @@ export class TraditionalBankingDemo {
     const units = bankingAmount(body.amount);
     const destination = text(body.destination, "Verified traditional account reference", 128);
     const reference = text(body.reference, "Payment reference", 200);
-    return this.transaction(actor, "payment", body.requestId, { accountId: body.accountId, mandateId: body.mandateId ?? null, destination, amount: decimal(units), reference }, state => {
+    return this.transaction(actor, "payment", body.requestId, { accountId: body.accountId, mandateId: body.mandateReference ?? null, destination, amount: decimal(units), reference }, state => {
       const account = state.accounts.find(a => a.id === body.accountId && a.rail === "traditional");
       requireThat(account, 404, "Traditional account not found");
       let mandateId: string | null = null;
-      if (actor.kind === "agent" || account.ownerId !== actor.id || body.mandateId) {
-        const id = actor.kind === "agent" ? actor.mandateId : body.mandateId;
+      if (actor.kind === "mandate" || account.ownerId !== actor.id || body.mandateReference) {
+        const id = actor.kind === "mandate" ? actor.mandateReference : body.mandateReference;
         const mandate = state.mandates.find(m => m.id === id && m.accountId === account.id);
         const customer = actor.kind === "customer" ? state.customers.find(c => c.id === actor.id) : undefined;
-        requireThat(mandate && (actor.kind === "agent" || account.ownerId === actor.id || (mandate.recipientType === "person" && mandate.recipient === customer?.email)), 403, "You do not have a mandate for this account");
+        requireThat(mandate && (actor.kind === "mandate" || account.ownerId === actor.id || (mandate.recipientType === "person" && mandate.recipient === customer?.email)), 403, "You do not have a mandate for this account");
         requireThat(mandate.status === "active" && mandate.expiresAt > new Date().toISOString(), 403, "This mandate has expired or been revoked");
         requireThat(mandate.verifiedRecipientsOnly, 403, "A verified-recipient payment mandate is required");
         requireThat(mandateSpent(state, mandate) + units <= BigInt(toBaseUnits(mandate.limit)), 403, "Payment exceeds the mandate's spending limit");
@@ -87,6 +86,7 @@ export class TraditionalBankingDemo {
       requireThat(account.verified, 403, "The sending traditional account is not verified");
       const seller = this.verifiedRecipient(state, destination);
       requireThat(seller, 403, "Seller is not a verified traditional demo account");
+      requireThat(seller.id !== account.id, 400, "Choose a different recipient account. Paying the source account would leave its balance unchanged.");
       const balance = BigInt(toBaseUnits(account.balance));
       requireThat(balance >= units, 409, "Insufficient traditional demo account balance");
       account.balance = decimal(balance - units);

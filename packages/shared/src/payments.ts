@@ -31,7 +31,8 @@ export interface SpendingAccount {
 }
 
 export interface AccountMandate {
-  id: string;
+  /** Non-secret reference for owner management and activity; cannot authorize payment. */
+  reference: string;
   accountId: string;
   name: string;
   recipientType: "person" | "agent";
@@ -57,7 +58,7 @@ export interface PaymentEntry {
   kind: "funding" | "payment";
   amount: string;
   currency: PaymentCurrency;
-  mandateId: string | null;
+  mandateReference: string | null;
   reference: string;
   createdAt: string;
   settlement: "traditional-demo" | "stellar-testnet";
@@ -86,7 +87,14 @@ export interface AccountOpening {
   account: SpendingAccount;
 }
 
+export interface MandateCreation {
+  mandate: AccountMandate;
+  /** Secret payment authorization. Never put this value in URLs or receipts. */
+  mandateId: string;
+}
+
 export interface MandatePaymentInput {
+  /** The secret ID is the only third-party payment authorization. */
   mandateId: string;
   sellerAddress: string;
   sellerName: string;
@@ -98,7 +106,7 @@ export interface MandatePaymentInput {
 
 export interface MandatePaymentPreview {
   rail?: "traditional" | "blockchain";
-  mandate: { id: string; name: string; address: string; limit: string; spent: string; expiresAt: string };
+  mandate: { name: string; address: string; limit: string; spent: string; expiresAt: string };
   seller: { address: string; name: string; verified: boolean };
   currency: string;
   balance: string;

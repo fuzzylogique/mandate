@@ -149,16 +149,15 @@ test("smart mandates install contract rules, sign with their rule, and revoke on
     await service.fund(owner, account.id, { amount: "10", requestId: "fund" });
     const result = await service.createMandate(owner, { accountId: account.id, name: "Agent", recipientType: "agent", recipient: "agent", limit: "2", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "mandate" });
     assert.equal(result.mandate.enforcement, "on-chain");
-    const agent = service.authenticate(result.token!, true);
     const seller = await service.createAccount(owner, { name: "Seller", type: "stellar", requestId: "seller" });
-    const paid = await service.pay(agent, { accountId: account.id, amount: "1", destination: seller.address, reference: "Test", requestId: "payment" });
-    assert.equal(paid.mandateId, result.mandate.id);
+    const paid = await service.payWithMandate({ mandateId: result.mandateId, amount: "1", sellerAddress: seller.address, reference: "Test", requestId: "payment" });
+    assert.equal(paid.mandateReference, result.mandate.reference);
     assert.equal(chain.transfers.at(-1)!.ruleId, result.mandate.ruleId);
     const view = await service.workspace(owner); assert.equal(view.mandates[0]!.spent, "1");
-    assert.equal(JSON.stringify(view).includes(result.token!), false);
-    await service.revoke(owner, result.mandate.id);
+    assert.equal(JSON.stringify(view).includes(result.mandateId), false);
+    await service.revoke(owner, result.mandate.reference);
     assert.equal(chain.rules.get(result.mandate.ruleId!)!.revoked, true);
-    assert.throws(() => service.authenticate(result.token!, true), { status: 401 });
+    await assert.rejects(service.previewMandatePayment({ mandateId: result.mandateId }), { status: 401 });
   } finally { service.close(); }
 });
 
@@ -168,12 +167,12 @@ test("failed on-chain revocation disables service access and stays visibly retry
     const account = await service.createAccount(owner, { name: "Smart", type: "stellar", requestId: "smart" });
     const grant = await service.createMandate(owner, { accountId: account.id, name: "Agent", recipientType: "agent", recipient: "agent", limit: "1", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "mandate" });
     chain.fail = true;
-    await assert.rejects(service.revoke(owner, grant.mandate.id));
-    assert.throws(() => service.authenticate(grant.token!, true), { status: 401 });
+    await assert.rejects(service.revoke(owner, grant.mandate.reference));
+    await assert.rejects(service.previewMandatePayment({ mandateId: grant.mandateId }), { status: 401 });
     assert.equal((await service.workspace(owner)).mandates[0]!.chainRevocationPending, true);
     assert.equal(chain.rules.get(grant.mandate.ruleId!)!.revoked, false);
     chain.fail = false;
-    await service.revoke(owner, grant.mandate.id);
+    await service.revoke(owner, grant.mandate.reference);
     assert.equal((await service.workspace(owner)).mandates[0]!.chainRevocationPending, false);
     assert.equal(chain.rules.get(grant.mandate.ruleId!)!.revoked, true);
   } finally { service.close(); }
@@ -200,17 +199,17 @@ test("gateway encrypts keys and command responses, detects changed retries, and 
   try {
     const wallet = gateway.treasury("owner");
     const privateKey = gateway.secret("owner", () => "unused");
-    const sensitive = "mandate_private_test_credential";
+    const sensitive = "mnd_private_test_secret_id";
     let calls = 0;
-    const run = () => gateway.command("request", { amount: "1" }, async () => { calls++; return { token: sensitive }; });
-    assert.equal((await run()).token, sensitive); assert.equal((await run()).token, sensitive); assert.equal(calls, 1);
+    const run = () => gateway.command("request", { amount: "1" }, async () => { calls++; return { mandateId: sensitive }; });
+    assert.equal((await run()).mandateId, sensitive); assert.equal((await run()).mandateId, sensitive); assert.equal(calls, 1);
     await assert.rejects(gateway.command("request", { amount: "2" }, async () => ({})), (error: unknown) => error instanceof ServiceError && error.status === 409);
     gateway.close();
     assert.equal(readFileSync(path).includes(Buffer.from(sensitive)), false);
     assert.equal(readFileSync(path).includes(Buffer.from(privateKey)), false);
     gateway = new StellarGateway(path, config);
     assert.equal(gateway.treasury("owner").address, wallet.address);
-    assert.equal((await run()).token, sensitive); assert.equal(calls, 1);
+    assert.equal((await run()).mandateId, sensitive); assert.equal(calls, 1);
     assert.throws(() => new StellarGateway(path, { ...config, verifier: StrKey.encodeContract(randomBytes(32)) }), { status: 503 });
   } finally { gateway.close(); rmSync(directory, { recursive: true, force: true }); }
 });
@@ -251,39 +250,74 @@ test("third-party mandate previews and payments enforce recipient, balance, iden
   try {
     const opened = await openWithMandate(service, owner, mandateOpening());
     const seller = await service.openAccount(owner, { name: "Seller", type: "stellar", requestId: "seller" });
-    const payer = service.authenticate(opened.token!, true);
-    const input = { mandateId: opened.mandate!.id, sellerAddress: seller.account.address, sellerName: "Seller", amount: "1", reference: "Test purchase", requestId: "purchase" };
-    const preview = await service.previewMandatePayment(payer, input);
+    const input = { mandateId: opened.mandateId, sellerAddress: seller.account.address, sellerName: "Seller", amount: "1", reference: "Test purchase", requestId: "purchase" };
+    const preview = await service.previewMandatePayment(input);
     assert.equal(preview.checks.find(c => c.label.includes("sufficient"))!.passed, false);
-    await assert.rejects(service.payWithMandate(payer, input), { status: 409 });
+    await assert.rejects(service.payWithMandate(input), { status: 409 });
     await service.fund(owner, opened.account.id, { amount: "5", requestId: "fund" });
-    assert.ok((await service.previewMandatePayment(payer, input)).checks.every(c => c.passed));
-    const paid = await service.payWithMandate(payer, input);
+    assert.ok((await service.previewMandatePayment(input)).checks.every(c => c.passed));
+    const paid = await service.payWithMandate(input);
     assert.ok(paid.txHash); assert.equal(paid.destination, seller.account.address);
-    assert.equal((await service.payWithMandate(payer, input)).txHash, paid.txHash);
-    await assert.rejects(service.payWithMandate(payer, { ...input, mandateId: "someone-else" }), { status: 403 });
-    await assert.rejects(service.payWithMandate(payer, { ...input, amount: "2", requestId: "overspend" }), { status: 403 });
+    assert.equal((await service.payWithMandate(input)).txHash, paid.txHash);
+    await assert.rejects(service.payWithMandate({ ...input, mandateId: "someone-else" }), { status: 401 });
+    await assert.rejects(service.payWithMandate({ ...input, amount: "2", requestId: "overspend" }), { status: 403 });
     const unverified = StrKey.encodeContract(randomBytes(32));
-    await assert.rejects(service.payWithMandate(payer, { ...input, sellerAddress: unverified, requestId: "unverified" }), { status: 403 });
-    await assert.rejects(service.payWithMandate(payer, { ...input, sellerAddress: Keypair.random().publicKey(), requestId: "classic" }), { status: 400 });
+    await assert.rejects(service.payWithMandate({ ...input, sellerAddress: unverified, requestId: "unverified" }), { status: 403 });
+    await assert.rejects(service.payWithMandate({ ...input, sellerAddress: Keypair.random().publicKey(), requestId: "classic" }), { status: 400 });
     chain.verified.delete(seller.account.address!);
-    assert.equal((await service.previewMandatePayment(payer, input)).seller.verified, false);
-    await assert.rejects(service.payWithMandate(payer, { ...input, requestId: "seller-revoked" }), { status: 403 });
+    assert.equal((await service.previewMandatePayment(input)).seller.verified, false);
+    await assert.rejects(service.payWithMandate({ ...input, requestId: "seller-revoked" }), { status: 403 });
     assert.equal(chain.transfers.filter(t => t.ruleId !== undefined).length, 1);
   } finally { service.close(); }
 });
 
-test("expired third-party credentials cannot authorize payments", async t => {
+for (const type of ["traditional", "stellar"] as const) {
+  test(`${type} payments reject the source as recipient without spending funds or mandate allowance`, async () => {
+    const { chain, service, owner } = await fixture();
+    try {
+      const source = await service.createAccount(owner, { name: "Source", type, requestId: "source" });
+      const seller = await service.createAccount(owner, { name: "Seller", type, requestId: "seller" });
+      await service.fund(owner, source.id, { amount: "10", requestId: "fund" });
+      const created = await service.createMandate(owner, { accountId: source.id, name: "Purchasing", recipientType: "agent", recipient: "Buyer", limit: "2", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "mandate" });
+      const input = { mandateId: created.mandateId, sellerAddress: source.address, sellerName: "Source", amount: "0.5", reference: "Purchase", requestId: "self" };
+      const identifiers = type === "traditional" ? [source.id, source.address, source.bankDetails!.accountNumber] : [source.address];
+      for (const identifier of identifiers) {
+        const preview = await service.previewMandatePayment({ ...input, sellerAddress: identifier });
+        assert.equal(preview.checks.find(check => check.label === "Recipient is different from the source account")!.passed, false);
+        await assert.rejects(service.payWithMandate({ ...input, sellerAddress: identifier }), { status: 400, message: /different recipient account/ });
+        await assert.rejects(service.pay(owner, { accountId: source.id, destination: identifier, amount: "0.5", reference: "Owner payment", requestId: "self-owner" }), { status: 400, message: /different recipient account/ });
+      }
+      const before = await service.workspace(owner);
+      assert.equal(before.accounts.find(a => a.id === source.id)!.balance, "10");
+      assert.equal(before.accounts.find(a => a.id === seller.id)!.balance, "0");
+      assert.equal(before.mandates[0]!.spent, "0");
+      assert.equal(before.activity.filter(e => e.kind === "payment").length, 0);
+      assert.equal(chain.transfers.filter(t => t.ruleId !== undefined).length, 0);
+
+      const payment = { ...input, sellerAddress: seller.address, sellerName: "Seller", requestId: "real-payment" };
+      assert.ok((await service.previewMandatePayment(payment)).checks.every(check => check.passed));
+      const receipt = await service.payWithMandate(payment);
+      assert.equal((await service.payWithMandate(payment)).id, receipt.id);
+      const after = await service.workspace(owner);
+      assert.equal(after.accounts.find(a => a.id === source.id)!.balance, "9.5");
+      assert.equal(after.accounts.find(a => a.id === seller.id)!.balance, "0.5");
+      assert.equal(after.mandates[0]!.spent, "0.5");
+      assert.equal(after.activity.filter(e => e.kind === "payment").length, 1);
+    } finally { service.close(); }
+  });
+}
+
+test("expired third-party mandate IDs cannot authorize payments", async t => {
   t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-14T12:00:00Z") });
   const { service, owner } = await fixture();
   try {
     const opened = await openWithMandate(service, owner, mandateOpening({ expiresAt: "2026-11-14T12:00:01Z" }));
     t.mock.timers.tick(1001);
-    assert.throws(() => service.authenticate(opened.token!, true), { status: 401 });
+    await assert.rejects(service.previewMandatePayment({ mandateId: opened.mandateId }), { status: 401 });
   } finally { service.close(); }
 });
 
-test("/pay accepts a mandate credential without an owner cookie and reports paid, declined or pending", async t => {
+test("/pay accepts a secret mandate ID without an owner cookie or separate credential and reports paid, declined or pending", async t => {
   const { chain, service, owner, token } = await fixture();
   const server = createPaymentApp(service).listen(0, "127.0.0.1");
   await new Promise<void>(resolve => server.once("listening", resolve));
@@ -293,8 +327,8 @@ test("/pay accepts a mandate credential without an owner cookie and reports paid
   const send = (path: string, input: unknown, headers = {}) => fetch(base + path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(input) });
   const opened = await openWithMandate(service, owner, mandateOpening());
   const seller = await service.openAccount(owner, { name: "Seller", type: "stellar", requestId: "seller" });
-  const input = { mandateId: opened.mandate!.id, sellerAddress: seller.account.address, sellerName: "Seller", amount: "1", reference: "Public payment", requestId: "public-pay" };
-  const auth = { authorization: `Bearer ${opened.token}` };
+  const input = { mandateId: opened.mandateId, sellerAddress: seller.account.address, sellerName: "Seller", amount: "1", reference: "Public payment", requestId: "public-pay" };
+  const auth = {};
   const cookieOnly = await send("/pay", input, { cookie: `mandate_session=${token}` });
   assert.equal((await cookieOnly.json() as { status: string }).status, "declined");
   const insufficient = await send("/pay", input, auth);
@@ -314,7 +348,7 @@ test("/pay accepts a mandate credential without an owner cookie and reports paid
   const awaiting = await pending.json() as { status: string; txHash: string };
   assert.equal(awaiting.status, "pending"); assert.equal(awaiting.txHash, "ab".repeat(32));
   chain.pending = false;
-  await service.revoke(owner, opened.mandate!.id);
+  await service.revoke(owner, opened.mandate.reference);
   const revoked = await send("/pay", { ...input, requestId: "revoked" }, auth);
   assert.equal((await revoked.json() as { status: string }).status, "declined");
 });
@@ -372,18 +406,17 @@ test("traditional mandates use an existing account with service limits and verif
     const created = await service.createMandate(owner, { accountId: source.id, rail: "traditional", name: "Team allowance", recipientType: "agent", recipient: "External person", limit: "10", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "bank-mandate" });
     assert.equal(created.mandate.rail, "traditional"); assert.equal(created.mandate.enforcement, "service");
     assert.equal(created.mandate.ruleId, undefined); assert.equal(created.mandate.accountId, source.id);
-    const payer = service.authenticate(created.token!, true);
-    const input = { mandateId: created.mandate.id, rail: "traditional", sellerAddress: seller.address, sellerName: "Seller", amount: "6", reference: "Travel", requestId: "purchase" };
-    assert.ok((await service.previewMandatePayment(payer, input)).checks.every(c => c.passed));
-    const paid = await service.payWithMandate(payer, input);
-    assert.equal(paid.settlement, "traditional-demo"); assert.equal(paid.mandateId, created.mandate.id);
-    await assert.rejects(service.payWithMandate(payer, { ...input, amount: "5", requestId: "over-limit" }), { status: 403 });
-    await assert.rejects(service.payWithMandate(payer, { ...input, rail: "blockchain" }), { status: 400 });
+    const input = { mandateId: created.mandateId, rail: "traditional", sellerAddress: seller.address, sellerName: "Seller", amount: "6", reference: "Travel", requestId: "purchase" };
+    assert.ok((await service.previewMandatePayment(input)).checks.every(c => c.passed));
+    const paid = await service.payWithMandate(input);
+    assert.equal(paid.settlement, "traditional-demo"); assert.equal(paid.mandateReference, created.mandate.reference);
+    await assert.rejects(service.payWithMandate({ ...input, amount: "5", requestId: "over-limit" }), { status: 403 });
+    await assert.rejects(service.payWithMandate({ ...input, rail: "blockchain" }), { status: 400 });
     const view = await service.workspace(owner);
     assert.equal(view.accounts.length, 2); assert.equal(view.mandates[0]!.spent, "6");
     assert.equal(chain.transfers.length, 0); assert.equal(chain.rules.size, 0);
-    await service.revoke(owner, created.mandate.id);
-    assert.throws(() => service.authenticate(created.token!, true), { status: 401 });
+    await service.revoke(owner, created.mandate.reference);
+    await assert.rejects(service.previewMandatePayment({ mandateId: created.mandateId }), { status: 401 });
   } finally { service.close(); }
 });
 
@@ -419,9 +452,9 @@ test("/pay supports a traditional mandate without an owner session and never rep
   await service.fund(owner, source.id, { amount: "100", requestId: "fund" });
   const mandateResponse = await send("/mandates", { accountId: source.id, rail: "traditional", name: "Buyer", recipientType: "agent", recipient: "Third party", limit: "10", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "mandate" }, ownerHeaders);
   assert.equal(mandateResponse.status, 201);
-  const created = await mandateResponse.json() as { mandate: { id: string }; token: string };
-  const input = { mandateId: created.mandate.id, rail: "traditional", sellerAddress: seller.address, sellerName: "Bank seller", amount: "5", reference: "Demo invoice", requestId: "public-bank" };
-  const headers = { authorization: `Bearer ${created.token}` };
+  const created = await mandateResponse.json() as { mandate: { reference: string }; mandateId: string };
+  const input = { mandateId: created.mandateId, rail: "traditional", sellerAddress: seller.address, sellerName: "Bank seller", amount: "5", reference: "Demo invoice", requestId: "public-bank" };
+  const headers = {};
   const preview = await send("/pay/preview", input, headers);
   assert.equal(preview.status, 200); assert.equal((await preview.json() as { rail: string }).rail, "traditional");
   const paid = await (await send("/pay", input, headers)).json() as { status: string; payment: { settlement: string; txHash?: string } };
@@ -504,7 +537,7 @@ test("funding retries survive a service restart without repeating the deposit", 
 });
 
 
-test("HTTP sessions protect management routes, validate origins and accept scoped payment credentials", async t => {
+test("HTTP sessions protect management routes and public payments use only the secret mandate ID", async t => {
   const { service } = await fixture();
   const server = createPaymentApp(service).listen(0, "127.0.0.1");
   await new Promise<void>(resolve => server.once("listening", resolve));
@@ -527,17 +560,20 @@ test("HTTP sessions protect management routes, validate origins and accept scope
   assert.equal((await send(`/accounts/${source.id}/funding`, { amount: "10", requestId: "fund" }, session)).status, 201);
   const grant = await send("/mandates", { accountId: source.id, rail: "traditional", name: "HTTP agent", recipientType: "agent", recipient: "api-agent", limit: "3", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "grant" }, session);
   assert.equal(grant.status, 201);
-  const result = await grant.json() as { token: string; mandate: { id: string } };
-  const credential = { authorization: `Bearer ${result.token}` };
-  const payment = { accountId: source.id, destination: seller.address, amount: "2", reference: "Supplies", requestId: "purchase" };
-  const first = await send("/payments", payment, credential);
-  assert.equal(first.status, 201);
-  const receipt = await first.json() as { id: string };
-  assert.equal((await (await send("/payments", payment, credential)).json() as { id: string }).id, receipt.id);
-  assert.equal((await send("/payments", { ...payment, requestId: "over-limit" }, credential)).status, 403);
-  assert.equal((await send("/payments", { ...payment, accountId: seller.id, requestId: "wrong-account" }, credential)).status, 403);
-  assert.equal((await fetch(base + `/mandates/${result.mandate.id}`, { method: "DELETE", headers: session })).status, 204);
-  assert.equal((await send("/payments", payment, credential)).status, 401);
+  const result = await grant.json() as { mandateId: string; mandate: { reference: string } };
+  const payment = { mandateId: result.mandateId, sellerAddress: seller.address, sellerName: "Seller", amount: "2", reference: "Supplies", requestId: "purchase" };
+  const first = await send("/pay", payment);
+  assert.equal(first.status, 200);
+  const receipt = await first.json() as { status: string; payment: { id: string } };
+  assert.equal(receipt.status, "paid");
+  const retry = await (await send("/pay", payment)).json() as { payment: { id: string } };
+  assert.equal(retry.payment.id, receipt.payment.id);
+  const denied = await (await send("/pay", { ...payment, requestId: "over-limit" })).json() as { status: string };
+  assert.equal(denied.status, "declined");
+  assert.equal((await send("/payments", { accountId: seller.id, mandateReference: result.mandate.reference, destination: source.address, amount: "1", reference: "Wrong source", requestId: "wrong-account" }, session)).status, 403);
+  assert.equal((await fetch(base + `/mandates/${result.mandate.reference}`, { method: "DELETE", headers: session })).status, 204);
+  const revoked = await (await send("/pay", payment)).json() as { status: string };
+  assert.equal(revoked.status, "declined");
   assert.equal((await send("/auth/logout", {}, session)).status, 204);
   assert.equal((await fetch(base + "/workspace", { headers: session })).status, 401);
   assert.equal((await send("/auth/login", { email: "http@example.com", password: "a secure HTTP password" })).status, 200);
@@ -555,19 +591,92 @@ test("person mandates isolate shared access and enforce traditional period reset
     const created = await service.createMandate(owner, { accountId: source.id, rail: "traditional", name: "Allowance", recipientType: "person", recipient: "holder@example.com", limit: "10", period: "day", expiresAt: "2026-11-17T12:00:00Z", requestId: "grant" });
     const shared = await service.workspace(holder);
     assert.deepEqual(shared.accounts, []); assert.equal(shared.shared.length, 1);
-    const payment = { accountId: source.id, mandateId: created.mandate.id, destination: seller.address, amount: "10", reference: "Supplies", requestId: "first" };
+    const payment = { accountId: source.id, mandateReference: created.mandate.reference, destination: seller.address, amount: "10", reference: "Supplies", requestId: "first" };
     await service.pay(holder, payment);
     await assert.rejects(service.pay(holder, { ...payment, requestId: "over-limit" }), { status: 403 });
     await assert.rejects(service.pay(holder, { ...payment, accountId: seller.id, requestId: "other-account" }), { status: 403 });
-    await assert.rejects(service.revoke(holder, created.mandate.id), { status: 404 });
+    await assert.rejects(service.revoke(holder, created.mandate.reference), { status: 404 });
     t.mock.timers.tick(86400_000);
     assert.equal((await service.workspace(holder)).shared[0]!.mandate.spent, "0");
     await service.pay(holder, { ...payment, requestId: "next-period" });
-    await service.revoke(owner, created.mandate.id);
+    await service.revoke(owner, created.mandate.reference);
     await assert.rejects(service.pay(holder, { ...payment, requestId: "revoked" }), { status: 403 });
     const expiring = await service.createMandate(owner, { accountId: source.id, rail: "traditional", name: "Expires", recipientType: "person", recipient: "holder@example.com", limit: "10", period: "day", expiresAt: "2026-11-16T12:00:00Z", requestId: "expiring" });
     t.mock.timers.tick(86400_000);
-    await assert.rejects(service.pay(holder, { ...payment, mandateId: expiring.mandate.id, requestId: "expired" }), { status: 403 });
-    assert.equal((await service.workspace(holder)).shared.find(s => s.mandate.id === expiring.mandate.id)!.mandate.status, "expired");
+    await assert.rejects(service.pay(holder, { ...payment, mandateReference: expiring.mandate.reference, requestId: "expired" }), { status: 403 });
+    assert.equal((await service.workspace(holder)).shared.find(s => s.mandate.reference === expiring.mandate.reference)!.mandate.status, "expired");
   } finally { service.close(); }
+});
+
+test("secret mandate IDs are stable on retries, owner-revealable, and absent from previews and receipts", async t => {
+  const { service, owner, token } = await fixture();
+  const server = createPaymentApp(service).listen(0, "127.0.0.1");
+  await new Promise<void>(resolve => server.once("listening", resolve));
+  t.after(async () => { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); service.close(); });
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api`;
+  const send = (path: string, body: unknown, headers = {}) => fetch(base + path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+  const source = (await service.openAccount(owner, { name: "Source", type: "traditional", requestId: "source" })).account;
+  const seller = (await service.openAccount(owner, { name: "Seller", type: "traditional", requestId: "seller" })).account;
+  await service.fund(owner, source.id, { amount: "20", requestId: "fund" });
+  const details = { accountId: source.id, rail: "traditional", name: "Purchasing", recipientType: "agent", recipient: "Buyer", limit: "10", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "mandate" };
+  const created = await service.createMandate(owner, details);
+  assert.match(created.mandateId, /^mnd_[A-Za-z0-9_-]{43}$/);
+  assert.equal("token" in created, false);
+  assert.notEqual(created.mandate.reference, created.mandateId);
+  assert.equal((await service.createMandate(owner, details)).mandateId, created.mandateId);
+  const second = await service.createMandate(owner, { ...details, requestId: "second" });
+  assert.notEqual(second.mandateId, created.mandateId);
+  const ownerHeaders = { cookie: `mandate_session=${token}` };
+  const path = `/mandates/${created.mandate.reference}/reveal`;
+  assert.equal((await send(path, {})).status, 401);
+  const other = await service.register({ name: "Other", email: "reveal-other@example.com", password: "another long password" });
+  assert.equal((await send(path, {}, { cookie: `mandate_session=${other.token}` })).status, 404);
+  const reveal = await send(path, {}, ownerHeaders);
+  assert.equal(reveal.status, 200); assert.equal(reveal.headers.get("cache-control"), "no-store");
+  assert.equal((await reveal.json() as { mandateId: string }).mandateId, created.mandateId);
+  const payment = { mandateId: created.mandateId, sellerAddress: seller.address, sellerName: "Seller", amount: "2", reference: "Invoice", requestId: "purchase" };
+  const publicRef = await send("/pay", { ...payment, mandateId: created.mandate.reference }, { ...ownerHeaders, authorization: `Bearer ${created.mandateId}` });
+  assert.equal((await publicRef.json() as { status: string }).status, "declined");
+  const missing = await send("/pay", { ...payment, mandateId: undefined }, ownerHeaders);
+  assert.equal((await missing.json() as { status: string }).status, "declined");
+  const preview = await service.previewMandatePayment(payment);
+  const receipt = await service.payWithMandate(payment);
+  const view = await service.workspace(owner);
+  for (const response of [preview, receipt, view]) {
+    const serialized = JSON.stringify(response);
+    assert.equal(serialized.includes(created.mandateId), false);
+    assert.equal(serialized.includes("mandateIdHash"), false);
+  }
+  assert.equal(receipt.mandateReference, created.mandate.reference);
+  assert.equal("mandateId" in receipt, false);
+  await service.revoke(owner, created.mandate.reference);
+  assert.equal(service.revealMandate(owner, created.mandate.reference).mandateId, created.mandateId);
+  await assert.rejects(service.payWithMandate({ ...payment, requestId: "revoked" }), { status: 401 });
+});
+
+test("stored mandates preserve signing rules and secret IDs through normalization and restart", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mandate-secret-id-"));
+  const path = join(directory, "workspace.sqlite");
+  const result = await fixture(path);
+  const { chain, owner } = result;
+  let service = result.service;
+  try {
+    const account = (await service.openAccount(owner, { name: "Source", type: "traditional", requestId: "source" })).account;
+    const details = { accountId: account.id, rail: "traditional", name: "Purchasing", recipientType: "agent", recipient: "Buyer", limit: "10", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "mandate" };
+    const created = await service.createMandate(owner, details);
+    service.close();
+    const { WorkspaceStore } = await import("./store.ts");
+    const store = new WorkspaceStore(path);
+    store.update(state => {
+      const saved = state.mandates[0]!;
+      Object.assign(saved, { tokenHash: saved.mandateIdHash });
+      delete saved.mandateIdHash;
+    });
+    store.close();
+    service = new StellarPaymentService(path, chain);
+    assert.equal(service.revealMandate(owner, created.mandate.reference).mandateId, created.mandateId);
+    assert.equal((await service.createMandate(owner, details)).mandateId, created.mandateId);
+    assert.equal((await service.workspace(owner)).mandates.length, 1);
+    assert.equal(readFileSync(path).includes(Buffer.from(created.mandateId)), false);
+  } finally { service.close(); rmSync(directory, { recursive: true, force: true }); }
 });

@@ -38,7 +38,7 @@ try {
   const created = await service.createMandate(owner, { accountId: smart.id, rail: "blockchain", name: "Third-party purchasing", recipientType: "agent", recipient: "External tester", limit: "0.2", period: "day", expiresAt: new Date(Date.now() + 3600_000).toISOString(), requestId: "mandate" });
   const opening = { account: smart, ...created };
   const mandate = created.mandate;
-  assert.ok(opening.token && mandate.verifiedRecipientsOnly && mandate.ruleId !== undefined);
+  assert.ok(opening.mandateId && mandate.verifiedRecipientsOnly && mandate.ruleId !== undefined);
   save("Fund smart", (await service.fund(owner, smart.id, { amount: "5", requestId: "fund-smart" })).txHash!);
   save("Smart-to-Smart payment", (await service.pay(owner, { accountId: smart.id, amount: "0.1", destination: seller.address, reference: "Smart network test", requestId: "smart-pay" })).txHash!);
   const stored = new (await import("../apps/receipts/src/payments/store.ts")).WorkspaceStore(path);
@@ -54,15 +54,15 @@ try {
   assert.equal(new Set(pairs.map(pair => pair.classicWalletId)).size, 2);
   const treasury = chain.wallet(pairs.find(pair => pair.accountId === smart.id)!.classicWalletId);
   const unverified = await chain.createAccount("unverified-test-seller", treasury);
-  const input = { mandateId: mandate.id, sellerAddress: seller.address, sellerName: "Verified seller", amount: "0.1", reference: "Third-party purchase", requestId: "third-party-pay" };
-  const send = async (body: typeof input, token = opening.token!) => {
+  const input = { mandateId: opening.mandateId, sellerAddress: seller.address, sellerName: "Verified seller", amount: "0.1", reference: "Third-party purchase", requestId: "third-party-pay" };
+  const send = async (body: typeof input) => {
     // No browser cookie or owner login is supplied here.
-    const response = await fetch(`http://127.0.0.1:${port}/api/pay`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
+    const response = await fetch(`http://127.0.0.1:${port}/api/pay`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     const result = await response.json() as MandatePaymentResult;
     assert.equal(response.status, 200, JSON.stringify(result));
     return result;
   };
-  assert.equal((await send(input, "wrong-credential")).status, "declined");
+  assert.equal((await send({ ...input, mandateId: "wrong-mandate-id" })).status, "declined");
   assert.equal((await send({ ...input, sellerAddress: unverified.address, requestId: "unverified-seller" })).status, "declined");
   assert.equal((await send({ ...input, sellerAddress: treasury.address, requestId: "classic-seller" })).status, "declined");
   const paid = await send(input);
@@ -73,7 +73,7 @@ try {
   assert.ok(repeated.status === "paid" && repeated.payment.txHash === paid.payment.txHash);
   assert.equal((await send({ ...input, amount: "0.2", requestId: "over-limit" })).status, "declined");
   // Bypass all service checks: both rules must still be enforced by the contract.
-  const rule = { id: mandate.id, ruleId: mandate.ruleId! };
+  const rule = { id: mandate.reference, ruleId: mandate.ruleId! };
   const wallet = chain.wallet(opening.account.id);
   assert.ok(chain.wallet(smart.id).paymentRuleId !== undefined, "Smart Account must use a verified-recipient payment rule");
   await assert.rejects(chain.transfer("smart-direct-classic", treasury, chain.wallet(smart.id), treasury.address, 1n));
@@ -82,10 +82,10 @@ try {
   await assert.rejects(chain.transfer("direct-unverified", treasury, wallet, unverified.address, 1n, rule));
   await assert.rejects(chain.transfer("direct-classic", treasury, wallet, treasury.address, 1n, rule));
   console.log("Smart and Mandate contracts rejected invalid recipients; mandate rejected overspend");
-  await service.revoke(owner, mandate.id);
+  await service.revoke(owner, mandate.reference);
   assert.equal((await send({ ...input, requestId: "revoked" })).status, "declined");
   await assert.rejects(chain.transfer("direct-revoked", treasury, wallet, seller.address!, 1n, rule));
-  console.log("Revoked credential and on-chain signer rejected");
+  console.log("Revoked mandate ID and on-chain signer rejected");
   const workspace = await service.workspace(owner);
   assert.equal("parent" in workspace, false);
   assert.equal("balances" in workspace.customer, false);
@@ -96,7 +96,8 @@ try {
   assert.equal(workspace.accounts.find(a => a.id === seller.id)!.verified, true);
   assert.equal(workspace.accounts.find(a => a.id === opening.account.id)!.verified, true);
   assert.equal(workspace.accounts.length, 4, "Mandate creation must use the source account, not open an account");
-  const proof = { fundingTransactions, network: chain.network.id, policy: config.verifiedSmartPolicy, privatePairs: pairs.map(pair => ({ accountId: pair.accountId, classicAddress: chain.wallet(pair.classicWalletId).address })), traditionalDemo: { source: bank.address, recipient: bankSeller.address, paymentId: demoPayment.id }, smart: smart.address, seller: seller.address, mandate: { id: mandate.id, account: opening.account.address }, checks: ["login holds no funds", "one-to-one private mapping", "single Add funds deposits then forwards", "Smart to Smart payment", "third-party without owner session", "idempotent retry", "wrong credential rejected", "Classic recipient rejected", "unverified Smart recipient rejected", "spending limit enforced on chain", "revocation enforced on chain"], receipts };
+  const proof = { fundingTransactions, network: chain.network.id, policy: config.verifiedSmartPolicy, privatePairs: pairs.map(pair => ({ accountId: pair.accountId, classicAddress: chain.wallet(pair.classicWalletId).address })), traditionalDemo: { source: bank.address, recipient: bankSeller.address, paymentId: demoPayment.id }, smart: smart.address, seller: seller.address, mandate: { reference: mandate.reference, account: opening.account.address }, checks: ["login holds no funds", "one-to-one private mapping", "single Add funds deposits then forwards", "Smart to Smart payment", "third-party without owner session", "idempotent retry", "wrong mandate ID rejected", "Classic recipient rejected", "unverified Smart recipient rejected", "spending limit enforced on chain", "revocation enforced on chain"], receipts };
+  assert.equal(JSON.stringify(proof).includes(opening.mandateId), false, "Public receipts must not contain the secret mandate ID");
   writeFileSync(join(directory, "receipts.json"), JSON.stringify(proof, null, 2));
   console.log(`Live checks passed. Receipts: ${join(directory, "receipts.json")}`);
 } finally {

@@ -1,5 +1,6 @@
 import { useState, type FormEvent, type ReactNode } from "react";
 import type { AccountMandate, SpendingAccount } from "@mandate/shared";
+import { formatValue, money } from "./format.ts";
 import { api } from "./api.ts";
 import { Dialog } from "./Dialog.tsx";
 
@@ -23,7 +24,7 @@ export function AccountForms({ action, onDone, onClose }: Props) {
     event.preventDefault(); setBusy(true); setError("");
     try {
       if (action.kind === "fund") await api.fund(account.id, amount, requestId);
-      else await api.pay({ accountId: account.id, mandateId: grant?.id, amount, destination: recipient, reference, requestId });
+      else await api.pay({ accountId: account.id, mandateReference: grant?.reference, amount, destination: recipient, reference, requestId });
       await onDone(); onClose();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Request failed"); }
     finally { setBusy(false); }
@@ -32,7 +33,7 @@ export function AccountForms({ action, onDone, onClose }: Props) {
     <form className="form" onSubmit={event => void submit(event)}>
       <p className="muted">{account.name} · {account.currency} · {traditional ? "Traditional account" : "Stellar account"}</p>
       {action.kind === "fund" ? <p className="form-note">{traditional ? "Add simulated USD to this account." : "Add testnet XLM to your Stellar account. Funding completes automatically."}</p> : <>
-        {grant && <p className="form-note">{grant.name}: {grant.spent} of {grant.limit} {account.currency} used. Only verified recipients are allowed.</p>}
+        {grant && <p className="form-note">{grant.name}: {formatValue(grant.spent, account.currency)} of {money(grant.limit, account.currency)} used. Only verified recipients are allowed.</p>}
         <Field label={traditional ? "Traditional recipient reference" : "Recipient Stellar account ID"}><input required maxLength={traditional ? 128 : 56} value={recipient} disabled={busy} onChange={event => change(() => setRecipient(event.target.value))} placeholder={traditional ? "BANK_DEMO_… or DEMO-…" : "C…"} /></Field>
         <Field label="Payment reference"><input required maxLength={200} value={reference} disabled={busy} onChange={event => change(() => setReference(event.target.value))} /></Field>
       </>}

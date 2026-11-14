@@ -16,7 +16,8 @@
     "test": "pnpm --filter @mandate/receipts test",
     "test:chain": "node --env-file=.env scripts/test-live-payments.ts",
     "test:contracts": "cargo test --manifest-path contracts/Cargo.toml --workspace",
-    "build": "pnpm --filter @mandate/web build"
+    "build": "pnpm --filter @mandate/web build",
+    "test:ui": "pnpm --filter @mandate/web test:ui"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^16.4.1"

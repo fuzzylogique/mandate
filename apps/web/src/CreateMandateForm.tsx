@@ -1,7 +1,8 @@
 import { useState, type FormEvent } from "react";
 import type { AccountMandate, PaymentWorkspace, SpendingAccount, SpendingPeriod } from "@mandate/shared";
+import { money } from "./format.ts";
 import { api } from "./api.ts";
-import { MandateCredentials } from "./MandateCredentials.tsx";
+import { MandateDetails } from "./MandateDetails.tsx";
 
 export function CreateMandateForm({ workspace, onDone }: { workspace: PaymentWorkspace; onDone: () => Promise<void> }) {
   const [rail, setRail] = useState<"traditional" | "blockchain">("traditional");
@@ -14,7 +15,7 @@ export function CreateMandateForm({ workspace, onDone }: { workspace: PaymentWor
   const [requestId, setRequestId] = useState(() => crypto.randomUUID());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
-  const [created, setCreated] = useState<{ mandate: AccountMandate; token: string; account: SpendingAccount } | null>(null);
+  const [created, setCreated] = useState<{ mandate: AccountMandate; mandateId: string; account: SpendingAccount } | null>(null);
   const traditional = rail === "traditional";
   const eligible = workspace.accounts.filter(a => a.rail === rail && a.verified);
   const account = eligible.find(a => a.id === accountId) ?? eligible[0];
@@ -24,16 +25,15 @@ export function CreateMandateForm({ workspace, onDone }: { workspace: PaymentWor
     setBusy(true); setError("");
     try {
       const result = await api.createMandate({ accountId: account.id, rail, name, recipientType: "agent", recipient: holder, limit, period, expiresAt: new Date(`${expiry}T23:59:59`).toISOString(), requestId });
-      if (!result.token) throw new Error("No payment credential was returned");
-      setCreated({ mandate: result.mandate, token: result.token, account });
+      setCreated({ mandate: result.mandate, mandateId: result.mandateId, account });
       await onDone();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not create the mandate"); }
     finally { setBusy(false); }
   };
-  if (created) return <section className="card mandate-form-card"><h2 className="form-card-title">Mandate created</h2><MandateCredentials {...created} onClose={() => { setCreated(null); setName(""); setHolder(""); setLimit(""); setRequestId(crypto.randomUUID()); }} /></section>;
+  if (created) return <section className="card mandate-form-card"><h2 className="form-card-title">Mandate created</h2><MandateDetails {...created} onClose={() => { setCreated(null); setName(""); setHolder(""); setLimit(""); setRequestId(crypto.randomUUID()); }} /></section>;
   return <section className="card mandate-form-card"><h2 className="form-card-title">Create a mandate</h2><form className="form" onSubmit={event => void submit(event)}>
     <label className="field">Payment method<select value={rail} disabled={busy} onChange={event => change(() => { const next = event.target.value as typeof rail; setRail(next); setAccountId(workspace.accounts.find(a => a.rail === next && a.verified)?.id ?? ""); })}><option value="traditional">Traditional payment · demo banking</option><option value="blockchain" disabled={!workspace.network?.mandates}>Stellar account payment · blockchain</option></select></label>
-    <label className="field">Source account<select required value={account?.id ?? ""} disabled={busy || eligible.length === 0} onChange={event => change(() => setAccountId(event.target.value))}>{eligible.length === 0 && <option value="">No verified {traditional ? "traditional" : "Stellar"} accounts yet</option>}{eligible.map(source => <option key={source.id} value={source.id}>{source.name} · {source.balance} {source.currency}</option>)}</select></label>
+    <label className="field">Source account<select required value={account?.id ?? ""} disabled={busy || eligible.length === 0} onChange={event => change(() => setAccountId(event.target.value))}>{eligible.length === 0 && <option value="">No verified {traditional ? "traditional" : "Stellar"} accounts yet</option>}{eligible.map(source => <option key={source.id} value={source.id}>{source.name} · {money(source.balance, source.currency)}</option>)}</select></label>
     {eligible.length === 0 && <p className="form-note">Open a verified {traditional ? "traditional" : "Stellar"} account first. <a href="/accounts/new">Open an account ↗</a></p>}
     <label className="field">Mandate name<input required maxLength={120} value={name} disabled={busy} onChange={event => change(() => setName(event.target.value))} placeholder="Team purchasing allowance" /></label>
     <label className="field">Mandate holder<input required maxLength={120} value={holder} disabled={busy} onChange={event => change(() => setHolder(event.target.value))} placeholder="A person, team, or agent" /></label>

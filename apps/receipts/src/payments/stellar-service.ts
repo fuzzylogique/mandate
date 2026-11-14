@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 import { StrKey } from "@stellar/stellar-sdk";
 import { formatAmount, toBaseUnits } from "@mandate/shared";
 import type { AccountMandate, AccountOpening, MandatePaymentPreview, PaymentEntry, PaymentWorkspace, SpendingAccount } from "@mandate/shared";
-import { WorkspaceStore, ServiceError, amount, mandateSpent, requireThat, text, validateMandateInput, type Actor, type EntryRecord, type MandateRecord, type StellarAccountPair } from "./store.ts";
+import { WorkspaceStore, ServiceError, amount, mandateSpent, requireThat, text, validateMandateInput, type Actor, type EntryRecord, type MandateRecord, type StellarAccountPair, publicEntry } from "./store.ts";
 import type { ChainGateway, ChainReceipt } from "./stellar.ts";
 import { TraditionalBankingDemo, bankingAmount } from "./traditional.ts";
 
@@ -26,7 +26,7 @@ export class StellarPaymentService {
   close() { this.core.close(); this.chain.close(); }
   register(body: Record<string, unknown>) { return this.core.register(body); }
   login(body: Record<string, unknown>) { return this.core.login(body); }
-  authenticate(token: string, agent = false) { return this.core.authenticate(token, agent); }
+  authenticate(token: string) { return this.core.authenticate(token); }
   logout(token: string) { return this.core.logout(token); }
   private customer(actor: Actor) {
     const found = actor.kind === "customer" && this.core.read().customers.find(c => c.id === actor.id);
@@ -67,8 +67,7 @@ export class StellarPaymentService {
         entry = { ...input, id, createdAt: timestamp(), settlement: "stellar-testnet", txHash: receipt.txHash, explorerUrl: `${this.network.explorerUrl}/tx/${receipt.txHash}` };
         state.entries.push(entry);
       }
-      const { ownerId: _owner, actorId: _actor, requestId: _request, ...view } = entry;
-      return view;
+      return publicEntry(entry);
     });
   }
   async workspace(actor: Actor): Promise<PaymentWorkspace> {
@@ -81,7 +80,7 @@ export class StellarPaymentService {
       accounts.set(account.id, { ...this.decorate(account), balance: decimal(balance), verified, verificationSource: account.rail === "blockchain" ? "on-chain" : undefined });
     }));
     const mandates = new Map<string, AccountMandate>();
-    for (const mandate of [...view.mandates, ...view.shared.map(s => s.mandate)]) mandates.set(mandate.id, mandate);
+    for (const mandate of [...view.mandates, ...view.shared.map(s => s.mandate)]) mandates.set(mandate.reference, mandate);
     await Promise.all([...mandates.values()].map(async mandate => {
       const source = accounts.get(mandate.accountId);
       mandate.rail = source?.rail === "traditional" ? "traditional" : "blockchain";
@@ -93,8 +92,8 @@ export class StellarPaymentService {
       ...view, mode: "stellar-testnet", network: this.network,
       accounts: view.accounts.map(a => accounts.get(a.id)!),
 
-      mandates: view.mandates.map(m => mandates.get(m.id)!),
-      shared: view.shared.map(s => ({ ...s, account: accounts.get(s.account.id)!, mandate: mandates.get(s.mandate.id)! })),
+      mandates: view.mandates.map(m => mandates.get(m.reference)!),
+      shared: view.shared.map(s => ({ ...s, account: accounts.get(s.account.id)!, mandate: mandates.get(s.mandate.reference)! })),
     };
   }
   async createAccount(actor: Actor, body: Record<string, unknown>): Promise<SpendingAccount> {
@@ -165,19 +164,28 @@ export class StellarPaymentService {
     if (traditional) bankingAmount(body.limit);
     const id = digest(commandId).slice(0, 32);
     const details = { accountId: account.id, name: validated.name, recipient: validated.recipient, recipientType: validated.recipientType, limit: validated.limit, period: validated.period, expiresAt: validated.expiresAt };
-    return this.chain.command(commandId, details, async () => {
+    await this.chain.command(commandId, details, async () => {
       let ruleId: number | undefined;
       if (account.rail === "blockchain") {
         const created = await this.chain.addMandate(id, this.classicWallet(account), this.chain.wallet(account.id), { name: validated.name, limit: BigInt(toBaseUnits(validated.limit)), period: validated.period!, expiresAt: validated.expiresAt });
         ruleId = created.ruleId;
       }
-      const token = this.chain.secret(`token:${id}`, () => `mandate_${randomBytes(32).toString("base64url")}`);
-      const mandate: MandateRecord = { ...validated, id, accountId: account.id, ruleId, rail: traditional ? "traditional" : "blockchain", spent: "0", status: "active", createdAt: timestamp(), enforcement: traditional ? "service" : "on-chain", verifiedRecipientsOnly: true, tokenHash: digest(token) };
-      if (!token) delete mandate.tokenHash;
+      const mandateId = this.chain.secret(`token:${id}`, () => `mnd_${randomBytes(32).toString("base64url")}`);
+      const mandate: MandateRecord = { ...validated, id, accountId: account.id, ruleId, rail: traditional ? "traditional" : "blockchain", spent: "0", status: "active", createdAt: timestamp(), enforcement: traditional ? "service" : "on-chain", verifiedRecipientsOnly: true, mandateIdHash: digest(mandateId) };
       this.core.update(state => { if (!state.mandates.some(m => m.id === id)) state.mandates.push(mandate); });
-      const { tokenHash: _hash, ...view } = mandate;
-      return { mandate: view, ...(token ? { token } : {}) };
+      return { reference: id };
     });
+    const state = this.core.read();
+    const mandate = state.mandates.find(m => m.id === id)!;
+    return { mandate: this.core.mandateView(state, mandate), ...this.revealMandate(actor, id) };
+  }
+  revealMandate(actor: Actor, reference: string) {
+    const mandate = this.core.read().mandates.find(m => m.id === reference);
+    requireThat(mandate, 404, "Mandate not found");
+    this.owned(actor, mandate.accountId);
+    const mandateId = this.chain.secret(`token:${reference}`, () => { throw new ServiceError(409, "The secret mandate ID is unavailable"); });
+    requireThat(!mandate.mandateIdHash || digest(mandateId) === mandate.mandateIdHash, 409, "The secret mandate ID is unavailable");
+    return { mandateId };
   }
   async revoke(actor: Actor, id: string) {
     const mandate = this.core.read().mandates.find(m => m.id === id);
@@ -201,15 +209,15 @@ export class StellarPaymentService {
     const destination = text(body.destination, "Stellar recipient address", 56);
     const reference = text(body.reference, "Payment reference", 200);
     const commandId = this.commandId(actor, "payment", body.requestId);
-    return this.chain.command(commandId, { accountId: body.accountId, mandateId: body.mandateId ?? null, destination, amount: decimal(units), reference }, async () => {
+    return this.chain.command(commandId, { accountId: body.accountId, mandateId: body.mandateReference ?? null, destination, amount: decimal(units), reference }, async () => {
       const state = this.core.read();
       const account = state.accounts.find(a => a.id === body.accountId);
       requireThat(account, 404, "Account not found");
       let mandate: MandateRecord | undefined;
-      if (actor.kind === "agent" || actor.id !== account.ownerId || body.mandateId) {
-        mandate = state.mandates.find(m => m.id === (actor.kind === "agent" ? actor.mandateId : body.mandateId) && m.accountId === account.id);
+      if (actor.kind === "mandate" || actor.id !== account.ownerId || body.mandateReference) {
+        mandate = state.mandates.find(m => m.id === (actor.kind === "mandate" ? actor.mandateReference : body.mandateReference) && m.accountId === account.id);
         const customer = actor.kind === "customer" ? this.customer(actor) : undefined;
-        requireThat(mandate && (actor.kind === "agent" || actor.id === account.ownerId || (mandate.recipientType === "person" && mandate.recipient === customer?.email)), 403, "You do not have a mandate for this account");
+        requireThat(mandate && (actor.kind === "mandate" || actor.id === account.ownerId || (mandate.recipientType === "person" && mandate.recipient === customer?.email)), 403, "You do not have a mandate for this account");
         requireThat(mandate.status === "active" && mandate.expiresAt > timestamp(), 403, "This mandate has expired or been revoked");
       }
       requireThat(account.rail === "blockchain", 400, "Payments must be sent from a Smart Account to a Smart Account");
@@ -224,6 +232,7 @@ export class StellarPaymentService {
       }
       if (!recovering) {
         requireThat(StrKey.isValidContract(destination), 400, "Smart accounts and mandates can only pay Smart C-address accounts");
+        requireThat(destination !== this.chain.wallet(account.id).address, 400, "Choose a different recipient account. Paying the source account would leave its balance unchanged.");
         requireThat(await this.chain.isVerifiedSmartAccount(destination), 403, "Seller is not a verified smart account");
         requireThat(await this.chain.isVerifiedSmartAccount(this.chain.wallet(account.id).address), 403, "The sending smart account is not verified");
         requireThat(await this.chain.balance(this.chain.wallet(account.id)) >= units, 409, "Insufficient account balance");
@@ -234,15 +243,16 @@ export class StellarPaymentService {
       return this.record({ ownerId: account.ownerId, actorId: actor.id, accountId: account.id, source: source.address, destination, kind: "payment", amount: decimal(units), currency: this.network.currency, mandateId: mandate?.id ?? null, reference, requestId: String(body.requestId) }, receipt);
     });
   }
-  private paymentMandate(actor: Actor, id: unknown) {
-    requireThat(actor.kind === "agent" && actor.mandateId === id, 403, "The credential does not authorize this mandate ID");
-    const mandate = this.core.read().mandates.find(m => m.id === id);
-    const traditional = this.core.read().accounts.find(a => a.id === mandate?.accountId)?.rail === "traditional";
-    requireThat(mandate?.verifiedRecipientsOnly && (traditional || mandate.ruleId !== undefined), 403, "A verified-recipient payment mandate is required");
-    return mandate;
+  private paymentMandate(value: unknown) {
+    const actor = this.core.authenticateMandate(value);
+    requireThat(actor.kind === "mandate", 401, "Enter a valid secret mandate ID");
+    const mandate = this.core.read().mandates.find(m => m.id === actor.mandateReference)!;
+    const traditional = this.core.read().accounts.find(a => a.id === mandate.accountId)?.rail === "traditional";
+    requireThat(mandate.verifiedRecipientsOnly && (traditional || mandate.ruleId !== undefined), 403, "A verified-recipient payment mandate is required");
+    return { actor, mandate };
   }
-  async previewMandatePayment(actor: Actor, body: Record<string, unknown>): Promise<MandatePaymentPreview> {
-    const mandate = this.paymentMandate(actor, body.mandateId);
+  async previewMandatePayment(body: Record<string, unknown>): Promise<MandatePaymentPreview> {
+    const { mandate } = this.paymentMandate(body.mandateId);
     const state = this.core.read();
     const source = state.accounts.find(a => a.id === mandate.accountId)!;
     requireThat(!body.rail || body.rail === source.rail, 400, "The selected payment method does not match this mandate");
@@ -252,11 +262,12 @@ export class StellarPaymentService {
       const seller = this.bank.verifiedRecipient(state, identifier);
       const spent = mandateSpent(state, mandate);
       return {
-        rail: "traditional", mandate: { id: mandate.id, name: mandate.name, address: source.address!, limit: mandate.limit, spent: decimal(spent), expiresAt: mandate.expiresAt },
+        rail: "traditional", mandate: { name: mandate.name, address: source.address!, limit: mandate.limit, spent: decimal(spent), expiresAt: mandate.expiresAt },
         seller: { address: identifier, name: text(body.sellerName || "Recipient", "Recipient name"), verified: !!seller }, currency: "USD", balance: source.balance,
         checks: [
           { label: "Mandate is active and has not expired", passed: mandate.status === "active" && mandate.expiresAt > timestamp() },
           { label: "Recipient is a verified traditional demo account", passed: !!seller },
+          { label: "Recipient is different from the source account", passed: !!seller && seller.id !== source.id },
           { label: "Payment is within the remaining spending limit", passed: spent + units <= BigInt(toBaseUnits(mandate.limit)) },
           { label: "Source account has sufficient demo funds", passed: BigInt(toBaseUnits(source.balance)) >= units },
         ],
@@ -271,20 +282,21 @@ export class StellarPaymentService {
     ]);
     return {
       rail: "blockchain",
-      mandate: { id: mandate.id, name: mandate.name, address: wallet.address, limit: mandate.limit, spent: decimal(spent), expiresAt: mandate.expiresAt },
+      mandate: { name: mandate.name, address: wallet.address, limit: mandate.limit, spent: decimal(spent), expiresAt: mandate.expiresAt },
       seller: { address: sellerAddress, name: sellerName, verified }, currency: this.network.currency, balance: decimal(balance),
       checks: [
         { label: "Mandate is active and has not expired", passed: mandate.status === "active" && mandate.expiresAt > timestamp() },
         { label: "Seller is a verified smart account", passed: verified },
+        { label: "Recipient is different from the source account", passed: sellerAddress !== wallet.address },
         { label: "Payment is within the remaining spending limit", passed: spent + units <= BigInt(toBaseUnits(mandate.limit)) },
         { label: "Mandate account has sufficient funds", passed: balance >= units },
       ],
     };
   }
-  async payWithMandate(actor: Actor, body: Record<string, unknown>): Promise<PaymentEntry> {
-    const mandate = this.paymentMandate(actor, body.mandateId);
+  async payWithMandate(body: Record<string, unknown>): Promise<PaymentEntry> {
+    const { actor, mandate } = this.paymentMandate(body.mandateId);
     const source = this.core.read().accounts.find(a => a.id === mandate.accountId)!;
     requireThat(!body.rail || body.rail === source.rail, 400, "The selected payment method does not match this mandate");
-    return this.pay(actor, { accountId: mandate.accountId, mandateId: mandate.id, amount: body.amount, destination: body.sellerAddress, reference: body.reference, requestId: body.requestId });
+    return this.pay(actor, { accountId: mandate.accountId, mandateReference: mandate.id, amount: body.amount, destination: body.sellerAddress, reference: body.reference, requestId: body.requestId });
   }
 }

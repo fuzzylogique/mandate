@@ -75,8 +75,7 @@ pnpm test:chain
 
 The service tests use a fake network and real SQLite storage. The chain check uses
 fresh testnet wallets, actual contracts and Friendbot funds. It checks one-to-one
-mapping, both funding transactions, Smart-to-Smart settlement, third-party payment
-credentials, idempotency, unverified-recipient refusal, spending limits and revocation.
+mapping, both funding transactions, Smart-to-Smart settlement, third-party secret mandate IDs, idempotency, unverified-recipient refusal, spending limits and revocation.
 It writes public transaction receipts to a temporary directory without printing keys.
 
 The seller registry is an administrator attestation of an exact C address. Automatic

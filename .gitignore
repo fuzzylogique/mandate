@@ -8,3 +8,5 @@ dist/
 contracts/target/
 .DS_Store
 .claude/
+playwright-report/
+test-results/

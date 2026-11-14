@@ -35,17 +35,7 @@ export function createPaymentApp(service: StellarPaymentService) {
   };
   const throttle = rateLimit(30, 15 * 60_000, "Too many sign-in attempts. Try again in 15 minutes.");
   const paymentThrottle = rateLimit(60, 60_000, "Too many payment requests. Try again in a minute.");
-  const actor = (req: Request) => {
-    const bearer = req.get("authorization");
-    if (bearer?.startsWith("Bearer ")) return service.authenticate(bearer.slice(7), true);
-    return service.authenticate(sessionToken(req));
-  };
-  const paymentActor = (req: Request) => {
-    const header = req.get("authorization");
-    if (!header?.startsWith("Bearer ")) throw new ServiceError(401, "Enter the mandate payment credential");
-    // A third-party payment never falls back to the owner's browser session.
-    return service.authenticate(header.slice(7), true);
-  };
+  const actor = (req: Request) => service.authenticate(sessionToken(req));
   const body = (req: Request): Record<string, unknown> => {
     if (!req.is("application/json") || !req.body || Array.isArray(req.body) || typeof req.body !== "object") throw new ServiceError(400, "A JSON object is required");
     return req.body as Record<string, unknown>;
@@ -69,14 +59,15 @@ export function createPaymentApp(service: StellarPaymentService) {
   });
   app.post("/api/accounts/:id/funding", async (req, res) => res.status(201).json(await service.fund(actor(req), req.params.id as string, body(req))));
   app.post("/api/mandates", async (req, res) => res.status(201).json(await service.createMandate(actor(req), body(req))));
+  app.post("/api/mandates/:id/reveal", (req, res) => res.json(service.revealMandate(actor(req), req.params.id as string)));
   app.delete("/api/mandates/:id", async (req, res) => { await service.revoke(actor(req), req.params.id as string); res.status(204).end(); });
   app.post("/api/payments", async (req, res) => res.status(201).json(await service.pay(actor(req), body(req))));
   app.post("/api/pay/preview", paymentThrottle, async (req, res) => {
-    res.json(await service.previewMandatePayment(paymentActor(req), body(req)));
+    res.json(await service.previewMandatePayment(body(req)));
   });
   app.post("/api/pay", paymentThrottle, async (req, res) => {
     try {
-      const payment = await service.payWithMandate(paymentActor(req), body(req));
+      const payment = await service.payWithMandate(body(req));
       res.json({ status: "paid", payment });
     } catch (error) {
       if (error instanceof ServiceError && error.txHash && error.status === 503) {
