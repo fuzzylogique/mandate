@@ -1,8 +1,10 @@
 //! Seller registry: which Stellar accounts belong to which verified domain.
 //!
-//! An attester (the admin) checks off-chain that a domain's `stellar.toml`
-//! (SEP-1) lists the seller's account, then records the pair here. The
-//! verified-seller policy reads this registry before letting an agent pay.
+//! An attester (the admin) records an address and nonempty metadata here.
+//! Off-chain checks are the attester's responsibility; this contract does not
+//! validate SEP-1, domain ownership or legal identity. The workspace prototype
+//! automatically records workspace metadata for deployed Smart Accounts.
+//! Payment policies read this registry before authorizing a recipient.
 #![no_std]
 
 use soroban_sdk::{

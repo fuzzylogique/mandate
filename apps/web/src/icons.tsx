@@ -21,26 +21,6 @@ function Icon({ children, size = 16 }: { children: ReactNode; size?: number }) {
 
 type Props = { size?: number };
 
-export const CheckIcon = ({ size }: Props) => (
-  <Icon size={size}>
-    <path d="M5 12.5l4.5 4.5L19 7.5" />
-  </Icon>
-);
-
-export const BlockedIcon = ({ size }: Props) => (
-  <Icon size={size}>
-    <circle cx="12" cy="12" r="8.5" />
-    <path d="M6 18L18 6" />
-  </Icon>
-);
-
-export const ShieldIcon = ({ size }: Props) => (
-  <Icon size={size}>
-    <path d="M12 3l7 3v5.5c0 4.2-2.8 7.6-7 9.5-4.2-1.900-7-5.300-7-9.500V6l7-3z" />
-    <path d="M9 12l2.200 2.200L15.200 10" />
-  </Icon>
-);
-
 export const PlusIcon = ({ size }: Props) => (
   <Icon size={size}>
     <path d="M12 5v14M5 12h14" />
@@ -50,18 +30,6 @@ export const PlusIcon = ({ size }: Props) => (
 export const CloseIcon = ({ size }: Props) => (
   <Icon size={size}>
     <path d="M6 6l12 12M18 6L6 18" />
-  </Icon>
-);
-
-export const ExternalIcon = ({ size }: Props) => (
-  <Icon size={size}>
-    <path d="M9 6h9v9M18 6L7 17" />
-  </Icon>
-);
-
-export const ChevronIcon = ({ size }: Props) => (
-  <Icon size={size}>
-    <path d="M9 6l6 6-6 6" />
   </Icon>
 );
 

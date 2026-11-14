@@ -1,0 +1,573 @@
+import assert from "node:assert/strict";
+import { randomBytes } from "node:crypto";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { Keypair, StrKey } from "@stellar/stellar-sdk";
+import type { PaymentNetwork, SpendingPeriod } from "@mandate/shared";
+import { StellarPaymentService } from "./stellar-service.ts";
+import { StellarGateway, stellarConfig, type ChainGateway, type ChainWallet } from "./stellar.ts";
+import { ServiceError } from "./store.ts";
+import { createPaymentApp } from "./http.ts";
+
+/** Fake network for service tests. It owns balances; the service cannot create money. */
+class TestChain implements ChainGateway {
+  network: PaymentNetwork = { id: "stellar:testnet", name: "Test chain", rpcUrl: "https://rpc.example", horizonUrl: "https://horizon.example", explorerUrl: "https://explorer.example", currency: "XLM", tokenContract: StrKey.encodeContract(randomBytes(32)), smartAccounts: true, verifiedSmartAccounts: true, mandates: true, faucet: true };
+  verified = new Set<string>();
+  wallets = new Map<string, ChainWallet>();
+  balances = new Map<string, bigint>();
+  values = new Map<string, string>();
+  commands = new Map<string, { fingerprint: string; result: unknown }>();
+  rules = new Map<number, { limit: bigint; spent: bigint; revoked: boolean }>();
+  transfers: { source: string; destination: string; amount: bigint; ruleId?: number }[] = [];
+  owners = new Map<string, string>();
+  deposits: { destination: string; amount: bigint }[] = [];
+  transactions = new Map<string, { txHash: string }>();
+  failFunding = false;
+  hasTransaction(id: string) { return this.transactions.has(id); }
+  async deposit(id: string, wallet: ChainWallet, units: bigint) {
+    const key = `deposit:${id}`;
+    if (this.transactions.has(key)) return this.transactions.get(key)!;
+    if (this.fail) throw new Error("Deposit unavailable");
+    this.balances.set(wallet.address, await this.balance(wallet) + units);
+    this.deposits.push({ destination: wallet.address, amount: units });
+    const receipt = this.receipt(); this.transactions.set(key, receipt); return receipt;
+  }
+  fail = false;
+  pending = false;
+  nextRule = 1;
+  private receipt() { return { txHash: randomBytes(32).toString("hex") }; }
+  close() {}
+  treasury(id: string): ChainWallet {
+    if (!this.wallets.has(id)) this.wallets.set(id, { id, address: Keypair.random().publicKey(), rail: "classic" });
+    return this.wallet(id);
+  }
+  wallet(id: string): ChainWallet { const found = this.wallets.get(id); if (!found) throw new ServiceError(409, "Wallet not found"); return found; }
+  secret(id: string, generate: () => string) { if (!this.values.has(id)) this.values.set(id, generate()); return this.values.get(id)!; }
+  async command<T>(id: string, input: unknown, work: () => Promise<T>): Promise<T> {
+    const fingerprint = JSON.stringify(input);
+    const existing = this.commands.get(id);
+    if (existing) { if (existing.fingerprint !== fingerprint) throw new ServiceError(409, "Idempotency key was used with different details"); if (existing.result !== undefined) return existing.result as T; }
+    this.commands.set(id, { fingerprint, result: undefined });
+    const result = await work(); this.commands.set(id, { fingerprint, result }); return result;
+  }
+  async balance(wallet: ChainWallet) { return this.balances.get(wallet.address) ?? 0n; }
+  async isVerifiedSmartAccount(address: string) { return StrKey.isValidContract(address) && this.verified.has(address); }
+  async verifySmartAccount(_id: string, wallet: ChainWallet) { assert.equal(wallet.rail, "blockchain"); this.verified.add(wallet.address); return this.receipt(); }
+  async faucet(wallet: ChainWallet) { if (!this.balances.has(wallet.address)) this.balances.set(wallet.address, 1_000_000_000n); return { ...this.receipt(), amount: "100" }; }
+  async createAccount(id: string, treasury: ChainWallet) {
+    if (this.fail) throw new Error("Network unavailable");
+    if (this.wallets.has(id)) return { ...this.wallet(id), ...this.receipt() };
+    const wallet: ChainWallet = { id, address: StrKey.encodeContract(randomBytes(32)), rail: "blockchain" };
+    this.owners.set(id, treasury.id);
+    this.wallets.set(id, wallet); return { ...wallet, ...this.receipt() };
+  }
+  async transfer(_id: string, _treasury: ChainWallet, source: ChainWallet, destination: string, units: bigint, mandate?: { id: string; ruleId: number }) {
+    if (this.transactions.has(_id)) return this.transactions.get(_id)!;
+    if (this.fail || (this.failFunding && source.rail === "classic")) throw new Error("Network unavailable");
+    if (source.rail === "blockchain") assert.equal(_treasury.id, this.owners.get(source.id), "The linked Classic wallet must sign");
+    if (this.pending) throw new ServiceError(503, "Awaiting network confirmation", "ab".repeat(32));
+    assert.ok(await this.balance(source) >= units, "Network rejected insufficient funds");
+    if (mandate) {
+      assert.ok(await this.isVerifiedSmartAccount(destination), "Contract rejected unverified smart recipient");
+      const rule = this.rules.get(mandate.ruleId)!;
+      assert.ok(!rule.revoked && rule.spent + units <= rule.limit, "Contract rejected mandate"); rule.spent += units;
+    }
+    this.balances.set(source.address, await this.balance(source) - units);
+    this.balances.set(destination, (this.balances.get(destination) ?? 0n) + units);
+    this.transfers.push({ source: source.address, destination, amount: units, ruleId: mandate?.ruleId });
+    const receipt = this.receipt(); this.transactions.set(_id, receipt); return receipt;
+  }
+  async addMandate(_id: string, _treasury: ChainWallet, _account: ChainWallet, input: { limit: bigint; name: string; period: SpendingPeriod; expiresAt: string }) {
+    assert.equal(_treasury.id, this.owners.get(_account.id));
+    const ruleId = this.nextRule++; this.rules.set(ruleId, { limit: input.limit, spent: 0n, revoked: false }); return { ...this.receipt(), ruleId };
+  }
+  async revokeMandate(_id: string, _treasury: ChainWallet, _account: ChainWallet, ruleId: number) { if (this.fail) throw new Error("Network unavailable"); assert.equal(_treasury.id, this.owners.get(_account.id)); this.rules.get(ruleId)!.revoked = true; return this.receipt(); }
+  async spent(_account: ChainWallet, ruleId: number) { return this.rules.get(ruleId)!.spent; }
+}
+async function fixture(path = ":memory:") {
+  const chain = new TestChain(); const service = new StellarPaymentService(path, chain);
+  const registered = await service.register({ name: "Chain owner", email: "owner@example.com", password: "long chain password" });
+  const owner = service.authenticate(registered.token);
+  return { chain, service, owner, token: registered.token };
+}
+
+test("chain workspace reads external balances and configurable network metadata", async () => {
+  const { chain, service, owner } = await fixture();
+  try {
+    const account = await service.createAccount(owner, { name: "Stellar", type: "stellar", requestId: "account" });
+    chain.balances.set(account.address!, 123_456_789n);
+    const view = await service.workspace(owner);
+    assert.equal(view.mode, "stellar-testnet");
+    assert.equal(view.accounts[0]!.balance, "12.3456789");
+    assert.equal("parent" in view, false);
+    assert.equal("balances" in view.customer, false);
+    assert.equal(view.accounts[0]!.address, account.address);
+    assert.equal(view.network!.rpcUrl, "https://rpc.example");
+  } finally { service.close(); }
+});
+
+test("failed chain deployment publishes no account and successful creation returns its transaction", async () => {
+  const { chain, service, owner } = await fixture();
+  try {
+    chain.fail = true;
+    const input = { name: "Research", type: "stellar", requestId: "research" };
+    await assert.rejects(service.createAccount(owner, input));
+    assert.equal((await service.workspace(owner)).accounts.length, 0);
+    chain.fail = false;
+    const created = await service.createAccount(owner, input);
+    assert.ok(created.address?.startsWith("C")); assert.ok(created.creationTxHash);
+    assert.equal(created.currency, "XLM");
+    assert.equal((await service.createAccount(owner, input)).id, created.id);
+    assert.equal((await service.workspace(owner)).accounts.length, 1);
+  } finally { service.close(); }
+});
+
+test("funding and payments use network addresses and only journal confirmed receipts", async () => {
+  const { chain, service, owner } = await fixture();
+  try {
+    const account = await service.createAccount(owner, { name: "Smart", type: "stellar", requestId: "smart" });
+    const input = { amount: "10", requestId: "fund" };
+    const entry = await service.fund(owner, account.id, input);
+    assert.equal(entry.destination, account.address);
+    assert.equal(entry.source, "Added funds");
+    assert.equal(chain.deposits[0]!.destination, chain.wallet(chain.owners.get(account.id)!).address);
+    assert.equal(entry.settlement, "stellar-testnet"); assert.ok(entry.txHash);
+    await service.fund(owner, account.id, input);
+    assert.equal(chain.transfers.length, 1);
+    chain.fail = true;
+    await assert.rejects(service.pay(owner, { accountId: account.id, destination: Keypair.random().publicKey(), amount: "1", reference: "Failure", requestId: "failure" }));
+    assert.equal((await service.workspace(owner)).activity.length, 1); // Only completed funding is visible.
+  } finally { service.close(); }
+});
+
+test("smart mandates install contract rules, sign with their rule, and revoke on chain", async () => {
+  const { chain, service, owner } = await fixture();
+  try {
+    const account = await service.createAccount(owner, { name: "Smart", type: "stellar", requestId: "smart" });
+    await service.fund(owner, account.id, { amount: "10", requestId: "fund" });
+    const result = await service.createMandate(owner, { accountId: account.id, name: "Agent", recipientType: "agent", recipient: "agent", limit: "2", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "mandate" });
+    assert.equal(result.mandate.enforcement, "on-chain");
+    const agent = service.authenticate(result.token!, true);
+    const seller = await service.createAccount(owner, { name: "Seller", type: "stellar", requestId: "seller" });
+    const paid = await service.pay(agent, { accountId: account.id, amount: "1", destination: seller.address, reference: "Test", requestId: "payment" });
+    assert.equal(paid.mandateId, result.mandate.id);
+    assert.equal(chain.transfers.at(-1)!.ruleId, result.mandate.ruleId);
+    const view = await service.workspace(owner); assert.equal(view.mandates[0]!.spent, "1");
+    assert.equal(JSON.stringify(view).includes(result.token!), false);
+    await service.revoke(owner, result.mandate.id);
+    assert.equal(chain.rules.get(result.mandate.ruleId!)!.revoked, true);
+    assert.throws(() => service.authenticate(result.token!, true), { status: 401 });
+  } finally { service.close(); }
+});
+
+test("failed on-chain revocation disables service access and stays visibly retryable", async () => {
+  const { chain, service, owner } = await fixture();
+  try {
+    const account = await service.createAccount(owner, { name: "Smart", type: "stellar", requestId: "smart" });
+    const grant = await service.createMandate(owner, { accountId: account.id, name: "Agent", recipientType: "agent", recipient: "agent", limit: "1", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "mandate" });
+    chain.fail = true;
+    await assert.rejects(service.revoke(owner, grant.mandate.id));
+    assert.throws(() => service.authenticate(grant.token!, true), { status: 401 });
+    assert.equal((await service.workspace(owner)).mandates[0]!.chainRevocationPending, true);
+    assert.equal(chain.rules.get(grant.mandate.ruleId!)!.revoked, false);
+    chain.fail = false;
+    await service.revoke(owner, grant.mandate.id);
+    assert.equal((await service.workspace(owner)).mandates[0]!.chainRevocationPending, false);
+    assert.equal(chain.rules.get(grant.mandate.ruleId!)!.revoked, true);
+  } finally { service.close(); }
+});
+
+test("a chain account and its mandates remain isolated from other customers", async () => {
+  const { chain, service, owner } = await fixture();
+  try {
+    const account = await service.createAccount(owner, { name: "Private", type: "stellar", requestId: "private" });
+    const other = await service.register({ name: "Other", email: "other@example.com", password: "other chain password" });
+    const actor = service.authenticate(other.token);
+    await assert.rejects(service.fund(actor, account.id, { amount: "1", requestId: "fund" }), { status: 404 });
+    await assert.rejects(service.pay(actor, { accountId: account.id, amount: "1", destination: Keypair.random().publicKey(), reference: "Unauthorized", requestId: "pay" }), { status: 403 });
+    assert.deepEqual((await service.workspace(actor)).accounts, []);
+    assert.deepEqual((await service.workspace(actor)).activity, []);
+  } finally { service.close(); }
+});
+
+test("gateway encrypts keys and command responses, detects changed retries, and persists results", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mandate-vault-"));
+  const path = join(directory, "chain.sqlite");
+  const config = stellarConfig({ PAYMENTS_ENCRYPTION_KEY: "ab".repeat(32) });
+  let gateway = new StellarGateway(path, config);
+  try {
+    const wallet = gateway.treasury("owner");
+    const privateKey = gateway.secret("owner", () => "unused");
+    const sensitive = "mandate_private_test_credential";
+    let calls = 0;
+    const run = () => gateway.command("request", { amount: "1" }, async () => { calls++; return { token: sensitive }; });
+    assert.equal((await run()).token, sensitive); assert.equal((await run()).token, sensitive); assert.equal(calls, 1);
+    await assert.rejects(gateway.command("request", { amount: "2" }, async () => ({})), (error: unknown) => error instanceof ServiceError && error.status === 409);
+    gateway.close();
+    assert.equal(readFileSync(path).includes(Buffer.from(sensitive)), false);
+    assert.equal(readFileSync(path).includes(Buffer.from(privateKey)), false);
+    gateway = new StellarGateway(path, config);
+    assert.equal(gateway.treasury("owner").address, wallet.address);
+    assert.equal((await run()).token, sensitive); assert.equal(calls, 1);
+    assert.throws(() => new StellarGateway(path, { ...config, verifier: StrKey.encodeContract(randomBytes(32)) }), { status: 503 });
+  } finally { gateway.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("chain configuration derives the asset contract and rejects missing encryption keys", () => {
+  assert.throws(() => stellarConfig({}), { status: 503 });
+  const config = stellarConfig({ PAYMENTS_ENCRYPTION_KEY: "ab".repeat(32), PAYMENTS_RPC_URL: "https://rpc.example", SMART_ACCOUNT_WASM_HASH: "12".repeat(32) });
+  const gateway = new StellarGateway(":memory:", config);
+  try {
+    assert.equal(gateway.network.currency, "XLM"); assert.equal(gateway.network.rpcUrl, "https://rpc.example");
+    assert.ok(StrKey.isValidContract(gateway.network.tokenContract));
+    assert.equal(gateway.network.smartAccounts, false);
+  } finally { gateway.close(); }
+});
+
+const mandateOpening = (overrides = {}) => ({ name: "Third-party purchasing", recipient: "External payer", limit: "2", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "mandate-opening", ...overrides });
+async function openWithMandate(service: StellarPaymentService, owner: ReturnType<StellarPaymentService["authenticate"]>, input = mandateOpening()) {
+  const account = (await service.openAccount(owner, { name: input.name, type: "stellar", requestId: input.requestId })).account;
+  const grant = await service.createMandate(owner, { ...input, accountId: account.id, recipientType: "agent", type: "stellar", requestId: `grant:${input.requestId}` });
+  return { account, ...grant };
+}
+
+test("only Traditional and Stellar openings are accepted and internal wallets cannot be selected", async () => {
+  const { chain, service, owner } = await fixture();
+  try {
+    for (const type of ["classic", "smart", "mandate"]) await assert.rejects(service.openAccount(owner, { name: "Invalid", type, requestId: type }), { status: 400 });
+    const smart = (await service.openAccount(owner, { name: "Stellar", type: "stellar", requestId: "stellar" })).account;
+    assert.ok(StrKey.isValidContract(smart.address!));
+    assert.equal("classicAccountId" in smart, false);
+    await assert.rejects(service.openAccount(owner, { name: "Override", type: "stellar", classicAccountId: chain.owners.get(smart.id), requestId: "override" }), { status: 400 });
+    await assert.rejects(service.pay(owner, { accountId: smart.id, amount: "1", destination: Keypair.random().publicKey(), reference: "Wrong route", requestId: "wrong-route" }), { status: 400 });
+    assert.equal((await service.workspace(owner)).accounts.length, 1);
+  } finally { service.close(); }
+});
+
+test("third-party mandate previews and payments enforce recipient, balance, identity and limit checks", async () => {
+  const { chain, service, owner } = await fixture();
+  try {
+    const opened = await openWithMandate(service, owner, mandateOpening());
+    const seller = await service.openAccount(owner, { name: "Seller", type: "stellar", requestId: "seller" });
+    const payer = service.authenticate(opened.token!, true);
+    const input = { mandateId: opened.mandate!.id, sellerAddress: seller.account.address, sellerName: "Seller", amount: "1", reference: "Test purchase", requestId: "purchase" };
+    const preview = await service.previewMandatePayment(payer, input);
+    assert.equal(preview.checks.find(c => c.label.includes("sufficient"))!.passed, false);
+    await assert.rejects(service.payWithMandate(payer, input), { status: 409 });
+    await service.fund(owner, opened.account.id, { amount: "5", requestId: "fund" });
+    assert.ok((await service.previewMandatePayment(payer, input)).checks.every(c => c.passed));
+    const paid = await service.payWithMandate(payer, input);
+    assert.ok(paid.txHash); assert.equal(paid.destination, seller.account.address);
+    assert.equal((await service.payWithMandate(payer, input)).txHash, paid.txHash);
+    await assert.rejects(service.payWithMandate(payer, { ...input, mandateId: "someone-else" }), { status: 403 });
+    await assert.rejects(service.payWithMandate(payer, { ...input, amount: "2", requestId: "overspend" }), { status: 403 });
+    const unverified = StrKey.encodeContract(randomBytes(32));
+    await assert.rejects(service.payWithMandate(payer, { ...input, sellerAddress: unverified, requestId: "unverified" }), { status: 403 });
+    await assert.rejects(service.payWithMandate(payer, { ...input, sellerAddress: Keypair.random().publicKey(), requestId: "classic" }), { status: 400 });
+    chain.verified.delete(seller.account.address!);
+    assert.equal((await service.previewMandatePayment(payer, input)).seller.verified, false);
+    await assert.rejects(service.payWithMandate(payer, { ...input, requestId: "seller-revoked" }), { status: 403 });
+    assert.equal(chain.transfers.filter(t => t.ruleId !== undefined).length, 1);
+  } finally { service.close(); }
+});
+
+test("expired third-party credentials cannot authorize payments", async t => {
+  t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-14T12:00:00Z") });
+  const { service, owner } = await fixture();
+  try {
+    const opened = await openWithMandate(service, owner, mandateOpening({ expiresAt: "2026-11-14T12:00:01Z" }));
+    t.mock.timers.tick(1001);
+    assert.throws(() => service.authenticate(opened.token!, true), { status: 401 });
+  } finally { service.close(); }
+});
+
+test("/pay accepts a mandate credential without an owner cookie and reports paid, declined or pending", async t => {
+  const { chain, service, owner, token } = await fixture();
+  const server = createPaymentApp(service).listen(0, "127.0.0.1");
+  await new Promise<void>(resolve => server.once("listening", resolve));
+  t.after(async () => { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); service.close(); });
+  const address = server.address() as { port: number };
+  const base = `http://127.0.0.1:${address.port}/api`;
+  const send = (path: string, input: unknown, headers = {}) => fetch(base + path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(input) });
+  const opened = await openWithMandate(service, owner, mandateOpening());
+  const seller = await service.openAccount(owner, { name: "Seller", type: "stellar", requestId: "seller" });
+  const input = { mandateId: opened.mandate!.id, sellerAddress: seller.account.address, sellerName: "Seller", amount: "1", reference: "Public payment", requestId: "public-pay" };
+  const auth = { authorization: `Bearer ${opened.token}` };
+  const cookieOnly = await send("/pay", input, { cookie: `mandate_session=${token}` });
+  assert.equal((await cookieOnly.json() as { status: string }).status, "declined");
+  const insufficient = await send("/pay", input, auth);
+  assert.match((await insufficient.json() as { reason: string }).reason, /Insufficient/);
+  await service.fund(owner, opened.account.id, { amount: "5", requestId: "fund" });
+  assert.equal((await send("/pay/preview", input, auth)).status, 200);
+  const response = await send("/pay", input, auth);
+  const paid = await response.json() as { status: string; payment: { txHash: string } };
+  assert.equal(paid.status, "paid"); assert.ok(paid.payment.txHash);
+  const retry = await send("/pay", input, auth);
+  assert.equal((await retry.json() as { payment: { txHash: string } }).payment.txHash, paid.payment.txHash);
+  const wrong = await send("/pay", { ...input, mandateId: "wrong" }, auth);
+  assert.equal((await wrong.json() as { status: string }).status, "declined");
+  chain.pending = true;
+  const pending = await send("/pay", { ...input, requestId: "pending" }, auth);
+  assert.equal(pending.status, 202);
+  const awaiting = await pending.json() as { status: string; txHash: string };
+  assert.equal(awaiting.status, "pending"); assert.equal(awaiting.txHash, "ab".repeat(32));
+  chain.pending = false;
+  await service.revoke(owner, opened.mandate!.id);
+  const revoked = await send("/pay", { ...input, requestId: "revoked" }, auth);
+  assert.equal((await revoked.json() as { status: string }).status, "declined");
+});
+
+test("traditional accounts open as verified banking-demo recipients without creating Stellar wallets", async () => {
+  const { chain, service, owner } = await fixture();
+  try {
+    chain.fail = true; // Any attempt to create a real wallet or transfer would fail.
+    const wallets = chain.wallets.size;
+    const opened = await service.openAccount(owner, { name: "Operating bank account", type: "traditional", requestId: "bank" });
+    assert.equal(opened.account.rail, "traditional"); assert.equal(opened.account.type, "traditional");
+    assert.equal(opened.account.verified, true); assert.equal(opened.account.verificationSource, "demo");
+    assert.equal(opened.account.currency, "USD"); assert.ok(opened.account.address!.startsWith("BANK_DEMO_"));
+    assert.ok(opened.account.bankDetails!.accountNumber.startsWith("DEMO-"));
+    assert.equal(opened.account.creationTxHash, undefined); assert.equal("token" in opened, false);
+    assert.equal(chain.wallets.size, wallets); assert.equal(chain.transfers.length, 0);
+    assert.equal((await service.openAccount(owner, { name: "Operating bank account", type: "traditional", requestId: "bank" })).account.id, opened.account.id);
+    const view = await service.workspace(owner);
+    assert.equal(view.accounts.find(a => a.id === opened.account.id)!.verified, true); assert.equal(opened.account.balance, "0");
+  } finally { service.close(); }
+});
+
+test("traditional payments credit verified recipients, preserve funds, reject wrong rails and process retries once", async () => {
+  const { chain, service, owner } = await fixture();
+  try {
+    const source = (await service.openAccount(owner, { name: "Bank source", type: "traditional", requestId: "source" })).account;
+    const seller = (await service.openAccount(owner, { name: "Bank seller", type: "traditional", requestId: "seller" })).account;
+    await service.fund(owner, source.id, { amount: "100", requestId: "fund-bank" });
+    await service.fund(owner, source.id, { amount: "100", requestId: "fund-bank" });
+    const input = { accountId: source.id, destination: seller.address, amount: "12.50", reference: "Invoice", requestId: "bank-payment" };
+    const paid = await service.pay(owner, input);
+    assert.equal(paid.settlement, "traditional-demo"); assert.equal(paid.txHash, undefined);
+    assert.equal((await service.pay(owner, input)).id, paid.id);
+    await assert.rejects(service.pay(owner, { ...input, amount: "15" }), { status: 409 });
+    await assert.rejects(service.pay(owner, { ...input, destination: StrKey.encodeContract(randomBytes(32)), requestId: "wrong-rail" }), { status: 403 });
+    await assert.rejects(service.pay(owner, { ...input, amount: "0.001", requestId: "fractional-cent" }), { status: 400 });
+    await assert.rejects(service.pay(owner, { ...input, amount: "100", requestId: "over-balance" }), { status: 409 });
+    const view = await service.workspace(owner);
+    assert.equal(view.accounts.find(a => a.id === source.id)!.balance, "87.5");
+    assert.equal(view.accounts.find(a => a.id === seller.id)!.balance, "12.5");
+    assert.equal("parent" in view, false); assert.equal(chain.transfers.length, 0);
+    await service.fund(owner, source.id, { amount: "1", requestId: "top-up" });
+    await service.fund(owner, source.id, { amount: "1", requestId: "top-up" });
+    assert.equal((await service.workspace(owner)).accounts.find(a => a.id === source.id)!.balance, "88.5");
+  } finally { service.close(); }
+});
+
+test("traditional mandates use an existing account with service limits and verified banking recipients", async () => {
+  const { chain, service, owner } = await fixture();
+  try {
+    const source = (await service.openAccount(owner, { name: "Source", type: "traditional", requestId: "source" })).account;
+    const seller = (await service.openAccount(owner, { name: "Seller", type: "traditional", requestId: "seller" })).account;
+    await service.fund(owner, source.id, { amount: "50", requestId: "fund" });
+    chain.fail = true;
+    const created = await service.createMandate(owner, { accountId: source.id, rail: "traditional", name: "Team allowance", recipientType: "agent", recipient: "External person", limit: "10", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "bank-mandate" });
+    assert.equal(created.mandate.rail, "traditional"); assert.equal(created.mandate.enforcement, "service");
+    assert.equal(created.mandate.ruleId, undefined); assert.equal(created.mandate.accountId, source.id);
+    const payer = service.authenticate(created.token!, true);
+    const input = { mandateId: created.mandate.id, rail: "traditional", sellerAddress: seller.address, sellerName: "Seller", amount: "6", reference: "Travel", requestId: "purchase" };
+    assert.ok((await service.previewMandatePayment(payer, input)).checks.every(c => c.passed));
+    const paid = await service.payWithMandate(payer, input);
+    assert.equal(paid.settlement, "traditional-demo"); assert.equal(paid.mandateId, created.mandate.id);
+    await assert.rejects(service.payWithMandate(payer, { ...input, amount: "5", requestId: "over-limit" }), { status: 403 });
+    await assert.rejects(service.payWithMandate(payer, { ...input, rail: "blockchain" }), { status: 400 });
+    const view = await service.workspace(owner);
+    assert.equal(view.accounts.length, 2); assert.equal(view.mandates[0]!.spent, "6");
+    assert.equal(chain.transfers.length, 0); assert.equal(chain.rules.size, 0);
+    await service.revoke(owner, created.mandate.id);
+    assert.throws(() => service.authenticate(created.token!, true), { status: 401 });
+  } finally { service.close(); }
+});
+
+test("traditional account funding and credentials remain isolated across customers", async () => {
+  const { service, owner } = await fixture();
+  try {
+    const source = (await service.openAccount(owner, { name: "Private source", type: "traditional", requestId: "source" })).account;
+    const other = await service.register({ name: "Other owner", email: "bank-other@example.com", password: "long banking password" });
+    const actor = service.authenticate(other.token);
+    const seller = (await service.openAccount(actor, { name: "Other recipient", type: "traditional", requestId: "seller" })).account;
+    await assert.rejects(service.fund(actor, source.id, { amount: "10", requestId: "intrusion" }), { status: 404 });
+    await assert.rejects(service.pay(actor, { accountId: source.id, destination: seller.address, amount: "1", reference: "Intrusion", requestId: "intrusion" }), { status: 403 });
+    await service.fund(owner, source.id, { amount: "20", requestId: "fund" });
+    await service.pay(owner, { accountId: source.id, destination: seller.bankDetails!.accountNumber, amount: "5", reference: "Cross-owner receipt", requestId: "payment" });
+    const otherView = await service.workspace(actor);
+    assert.equal(otherView.accounts.length, 1); assert.equal(otherView.accounts[0]!.balance, "5");
+    assert.equal(otherView.accounts.some(a => a.id === source.id), false);
+  } finally { service.close(); }
+});
+
+test("/pay supports a traditional mandate without an owner session and never reports a blockchain transaction", async t => {
+  const { chain, service, owner, token } = await fixture();
+  const server = createPaymentApp(service).listen(0, "127.0.0.1");
+  await new Promise<void>(resolve => server.once("listening", resolve));
+  t.after(async () => { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); service.close(); });
+  const port = (server.address() as { port: number }).port;
+  const send = (path: string, body: unknown, headers = {}) => fetch(`http://127.0.0.1:${port}/api${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+  const ownerHeaders = { cookie: `mandate_session=${token}` };
+  const accountResponse = await send("/accounts/open", { name: "Bank source", type: "traditional", requestId: "source" }, ownerHeaders);
+  assert.equal(accountResponse.status, 201);
+  const { account: source } = await accountResponse.json() as { account: { id: string } };
+  const seller = (await service.openAccount(owner, { name: "Bank seller", type: "traditional", requestId: "seller" })).account;
+  await service.fund(owner, source.id, { amount: "100", requestId: "fund" });
+  const mandateResponse = await send("/mandates", { accountId: source.id, rail: "traditional", name: "Buyer", recipientType: "agent", recipient: "Third party", limit: "10", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "mandate" }, ownerHeaders);
+  assert.equal(mandateResponse.status, 201);
+  const created = await mandateResponse.json() as { mandate: { id: string }; token: string };
+  const input = { mandateId: created.mandate.id, rail: "traditional", sellerAddress: seller.address, sellerName: "Bank seller", amount: "5", reference: "Demo invoice", requestId: "public-bank" };
+  const headers = { authorization: `Bearer ${created.token}` };
+  const preview = await send("/pay/preview", input, headers);
+  assert.equal(preview.status, 200); assert.equal((await preview.json() as { rail: string }).rail, "traditional");
+  const paid = await (await send("/pay", input, headers)).json() as { status: string; payment: { settlement: string; txHash?: string } };
+  assert.equal(paid.status, "paid"); assert.equal(paid.payment.settlement, "traditional-demo"); assert.equal(paid.payment.txHash, undefined);
+  const refused = await send("/pay", { ...input, amount: "6", requestId: "over-limit" }, headers);
+  assert.equal((await refused.json() as { status: string }).status, "declined");
+  assert.equal(chain.transfers.length, 0);
+});
+
+
+test("a login holds no funds and a Stellar opening publishes one account with a private one-to-one pair", async () => {
+  const { chain, service, owner } = await fixture();
+  try {
+    assert.deepEqual((await service.workspace(owner)).accounts, []);
+    assert.equal(chain.wallets.size, 0);
+    const first = (await service.openAccount(owner, { name: "First", type: "stellar", requestId: "first" })).account;
+    const second = (await service.openAccount(owner, { name: "Second", type: "stellar", requestId: "second" })).account;
+    assert.notEqual(chain.owners.get(first.id), chain.owners.get(second.id));
+    const internalAddress = chain.wallet(chain.owners.get(first.id)!).address;
+    const view = await service.workspace(owner);
+    assert.equal(view.accounts.length, 2);
+    assert.ok(view.accounts.every(a => a.rail === "blockchain" && StrKey.isValidContract(a.address!)));
+    assert.equal(JSON.stringify(view).includes(internalAddress), false);
+    assert.equal(JSON.stringify(view).includes("classicAccountId"), false);
+    assert.equal("parent" in view, false);
+    assert.equal("balances" in view.customer, false);
+    const repeat = await service.openAccount(owner, { name: "First", type: "stellar", requestId: "first" });
+    assert.equal(repeat.account.id, first.id);
+    assert.equal(chain.wallets.size, 4);
+  } finally { service.close(); }
+});
+
+test("Add funds deposits into the mapped wallet then automatically forwards exactly once", async () => {
+  const { chain, service, owner } = await fixture();
+  try {
+    const account = (await service.openAccount(owner, { name: "Stellar", type: "stellar", requestId: "stellar" })).account;
+    const second = (await service.openAccount(owner, { name: "Second", type: "stellar", requestId: "second" })).account;
+    const internal = chain.wallet(chain.owners.get(account.id)!);
+    const original = await chain.balance(internal);
+    const entry = await service.fund(owner, account.id, { amount: "5", requestId: "fund" });
+    assert.equal(chain.deposits[0]!.destination, internal.address);
+    assert.equal(chain.transfers[0]!.source, internal.address);
+    assert.equal(chain.transfers[0]!.destination, account.address);
+    assert.equal(await chain.balance(internal), original);
+    assert.equal(await chain.balance(chain.wallet(account.id)), 50_000_000n);
+    assert.equal(await chain.balance(chain.wallet(second.id)), 0n);
+    assert.equal((await service.fund(owner, account.id, { amount: "5", requestId: "fund" })).id, entry.id);
+    assert.equal(chain.deposits.length, 1); assert.equal(chain.transfers.length, 1);
+    await assert.rejects(service.fund(owner, account.id, { amount: "6", requestId: "fund" }), { status: 409 });
+    await assert.rejects(service.fund(owner, internal.id, { amount: "1", requestId: "internal" }), { status: 404 });
+    await assert.rejects(service.fund(owner, account.id, { amount: "1", sourceAccountId: internal.id, requestId: "override" }), { status: 400 });
+    const view = await service.workspace(owner);
+    assert.equal(view.activity.length, 1); assert.equal(view.activity[0]!.accountId, account.id);
+    assert.equal(JSON.stringify(view).includes(internal.address), false);
+  } finally { service.close(); }
+});
+
+test("funding retries survive a service restart without repeating the deposit", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mandate-funding-recovery-"));
+  const path = join(directory, "workspace.sqlite");
+  const fixtureResult = await fixture(path);
+  const { chain, owner } = fixtureResult;
+  let service = fixtureResult.service;
+  try {
+    const account = (await service.openAccount(owner, { name: "Stellar", type: "stellar", requestId: "stellar" })).account;
+    const input = { amount: "5", requestId: "fund" };
+    chain.failFunding = true;
+    await assert.rejects(service.fund(owner, account.id, input));
+    assert.equal(chain.deposits.length, 1);
+    await assert.rejects(service.fund(owner, account.id, { ...input, amount: "6" }), { status: 409 });
+    assert.equal(await chain.balance(chain.wallet(account.id)), 0n);
+    assert.equal((await service.workspace(owner)).activity.length, 0);
+    service.close(); service = new StellarPaymentService(path, chain);
+    chain.failFunding = false;
+    await service.fund(owner, account.id, input);
+    assert.equal(chain.deposits.length, 1);
+    assert.equal(chain.transfers.length, 1);
+    assert.equal(await chain.balance(chain.wallet(account.id)), 50_000_000n);
+  } finally { service.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+
+test("HTTP sessions protect management routes, validate origins and accept scoped payment credentials", async t => {
+  const { service } = await fixture();
+  const server = createPaymentApp(service).listen(0, "127.0.0.1");
+  await new Promise<void>(resolve => server.once("listening", resolve));
+  t.after(async () => { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); service.close(); });
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api`;
+  const send = (path: string, body: unknown, headers = {}) => fetch(base + path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
+  assert.equal((await fetch(base + "/workspace")).status, 401);
+  const registered = await send("/auth/register", { name: "HTTP user", email: "http@example.com", password: "a secure HTTP password" });
+  assert.equal(registered.status, 201);
+  const cookieHeader = registered.headers.get("set-cookie")!;
+  assert.match(cookieHeader, /HttpOnly/i); assert.match(cookieHeader, /SameSite=Strict/i);
+  const session = { cookie: cookieHeader.split(";")[0]! };
+  const open = async (name: string) => {
+    const response = await send("/accounts/open", { name, type: "traditional", requestId: name }, session);
+    assert.equal(response.status, 201);
+    return (await response.json() as { account: { id: string; address: string } }).account;
+  };
+  const source = await open("Source"); const seller = await open("Seller");
+  assert.equal((await send(`/accounts/${source.id}/funding`, { amount: "10", requestId: "fund" }, { ...session, origin: "https://other.example" })).status, 403);
+  assert.equal((await send(`/accounts/${source.id}/funding`, { amount: "10", requestId: "fund" }, session)).status, 201);
+  const grant = await send("/mandates", { accountId: source.id, rail: "traditional", name: "HTTP agent", recipientType: "agent", recipient: "api-agent", limit: "3", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "grant" }, session);
+  assert.equal(grant.status, 201);
+  const result = await grant.json() as { token: string; mandate: { id: string } };
+  const credential = { authorization: `Bearer ${result.token}` };
+  const payment = { accountId: source.id, destination: seller.address, amount: "2", reference: "Supplies", requestId: "purchase" };
+  const first = await send("/payments", payment, credential);
+  assert.equal(first.status, 201);
+  const receipt = await first.json() as { id: string };
+  assert.equal((await (await send("/payments", payment, credential)).json() as { id: string }).id, receipt.id);
+  assert.equal((await send("/payments", { ...payment, requestId: "over-limit" }, credential)).status, 403);
+  assert.equal((await send("/payments", { ...payment, accountId: seller.id, requestId: "wrong-account" }, credential)).status, 403);
+  assert.equal((await fetch(base + `/mandates/${result.mandate.id}`, { method: "DELETE", headers: session })).status, 204);
+  assert.equal((await send("/payments", payment, credential)).status, 401);
+  assert.equal((await send("/auth/logout", {}, session)).status, 204);
+  assert.equal((await fetch(base + "/workspace", { headers: session })).status, 401);
+  assert.equal((await send("/auth/login", { email: "http@example.com", password: "a secure HTTP password" })).status, 200);
+});
+
+test("person mandates isolate shared access and enforce traditional period resets, expiry and revocation", async t => {
+  t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-14T12:00:00Z") });
+  const { service, owner } = await fixture();
+  try {
+    const registered = await service.register({ name: "Holder", email: "holder@example.com", password: "a secure holder password" });
+    const holder = service.authenticate(registered.token);
+    const source = (await service.openAccount(owner, { name: "Source", type: "traditional", requestId: "source" })).account;
+    const seller = (await service.openAccount(owner, { name: "Seller", type: "traditional", requestId: "seller" })).account;
+    await service.fund(owner, source.id, { amount: "50", requestId: "fund" });
+    const created = await service.createMandate(owner, { accountId: source.id, rail: "traditional", name: "Allowance", recipientType: "person", recipient: "holder@example.com", limit: "10", period: "day", expiresAt: "2026-11-17T12:00:00Z", requestId: "grant" });
+    const shared = await service.workspace(holder);
+    assert.deepEqual(shared.accounts, []); assert.equal(shared.shared.length, 1);
+    const payment = { accountId: source.id, mandateId: created.mandate.id, destination: seller.address, amount: "10", reference: "Supplies", requestId: "first" };
+    await service.pay(holder, payment);
+    await assert.rejects(service.pay(holder, { ...payment, requestId: "over-limit" }), { status: 403 });
+    await assert.rejects(service.pay(holder, { ...payment, accountId: seller.id, requestId: "other-account" }), { status: 403 });
+    await assert.rejects(service.revoke(holder, created.mandate.id), { status: 404 });
+    t.mock.timers.tick(86400_000);
+    assert.equal((await service.workspace(holder)).shared[0]!.mandate.spent, "0");
+    await service.pay(holder, { ...payment, requestId: "next-period" });
+    await service.revoke(owner, created.mandate.id);
+    await assert.rejects(service.pay(holder, { ...payment, requestId: "revoked" }), { status: 403 });
+    const expiring = await service.createMandate(owner, { accountId: source.id, rail: "traditional", name: "Expires", recipientType: "person", recipient: "holder@example.com", limit: "10", period: "day", expiresAt: "2026-11-16T12:00:00Z", requestId: "expiring" });
+    t.mock.timers.tick(86400_000);
+    await assert.rejects(service.pay(holder, { ...payment, mandateId: expiring.mandate.id, requestId: "expired" }), { status: 403 });
+    assert.equal((await service.workspace(holder)).shared.find(s => s.mandate.id === expiring.mandate.id)!.mandate.status, "expired");
+  } finally { service.close(); }
+});

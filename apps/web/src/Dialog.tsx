@@ -6,22 +6,33 @@ interface DialogProps {
   title: string;
   onClose: () => void;
   children: ReactNode;
-  /** Extra class on the panel, e.g. for the receipt's narrower width. */
+  /** Extra class on the dialog panel. */
   className?: string;
 }
 
 export function Dialog({ title, onClose, children, className }: DialogProps) {
   const panel = useRef<HTMLDivElement>(null);
+  const close = useRef(onClose);
+  close.current = onClose;
 
   useEffect(() => {
+    const previousFocus = document.activeElement as HTMLElement | null;
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") close.current();
+      if (event.key === "Tab") {
+        const elements = panel.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea, a[href], [tabindex="0"]');
+        if (!elements?.length) { event.preventDefault(); return; }
+        const first = elements[0]!;
+        const last = elements[elements.length - 1]!;
+        if (event.shiftKey && (document.activeElement === first || document.activeElement === panel.current)) { event.preventDefault(); last.focus(); }
+        else if (!event.shiftKey && (document.activeElement === last || document.activeElement === panel.current)) { event.preventDefault(); first.focus(); }
+      }
     };
     document.addEventListener("keydown", onKey);
     // Keep keyboard focus inside the dialog from the start.
     panel.current?.focus();
-    return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+    return () => { document.removeEventListener("keydown", onKey); previousFocus?.focus(); };
+  }, []);
 
   return (
     <div

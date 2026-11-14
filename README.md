@@ -1,248 +1,186 @@
 # Mandate
 
-Spending rules and receipts for AI agents, enforced on Stellar.
+An email/password payment workspace with two account types:
 
-An owner gives each agent a **mandate**: how much it may spend per period, which
-verified sellers it may pay, and until when. The rules live in Stellar Smart
-Contracts and are checked at payment time, so an over-limit payment or a payment to an
-unverified seller fails on-chain no matter what the agent does. Every payment
-that goes through becomes a receipt: agent, owner, seller, amount, transaction.
+- **Traditional account:** simulated USD banking with a local ledger.
+- **Stellar account:** one visible account with a Smart Account C address and XLM balance on Stellar testnet.
 
-Built for the Blockchain Innovation Challenge powered by Stellar (Problem Space 2,
-Verification Infrastructure). "Mandate" is a working name.
+The login holds no money. Every Stellar account has a private, one-to-one mapping
+between its Smart contract and a Classic wallet. Opening and funding manage both
+in the background. Users never select or manage the Classic wallet.
 
-## How it works
+## Run
 
-```
-Owner ──creates / revokes mandate──► Smart account (C-address, holds USDC)
-                                      └─ rule: agent key, USDC transfers only, expiry
-                                          ├─ spending-limit policy
-                                          └─ verified-seller policy ──► seller registry
+For this configured checkout:
 
-Agent ──request──► Seller API ──402──► agent signs one transfer ──► facilitator settles, pays fees
-
-Receipt service ◄── PaymentAuthorized events + what the agent bought ──► dashboard, email
+```bash
+pnpm dev
 ```
 
-On-chain: who may spend, how much, to whom, and proof that a payment passed
-those checks. Off-chain: what was bought, names, emails.
+Open http://localhost:4020. The dashboard runs on port 4020 and proxies `/api` to
+the payments API on port 4022.
 
-## Layout
-
-| Path | What it is |
-|---|---|
-| `contracts/account` | The smart account. Adapted from OpenZeppelin's multisig example. |
-| `contracts/ed25519-verifier` | Checks agent signatures. OpenZeppelin wrapper. |
-| `contracts/spending-limit-policy` | Cap per rolling window. OpenZeppelin wrapper. |
-| `contracts/seller-registry` | Verified seller accounts and their domains. Ours. |
-| `contracts/verified-seller-policy` | Rejects payments to unregistered sellers; emits the receipt event. Ours. |
-| `apps/merchant` | Demo seller: a paid API behind x402. A fixture, not the product. |
-| `apps/agent` | Buyer agent: pays for a URL over x402, from its own account or from the smart account. |
-| `apps/facilitator` | Our own x402 facilitator. Needed for smart-account payments (see below). |
-| `apps/receipts` | Dashboard API: indexes payments into receipts, reads balance and mandates from chain, creates and revokes mandates, runs demo purchases, records refusals. |
-| `apps/web` | Owner dashboard: balance, agents and their limits, activity with receipts and declined payments. |
-| `packages/shared` | Types shared by the TypeScript packages. |
-| `scripts/` | Testnet setup, contract deployment, mandate creation, funding, direct transfer test. |
-
-## Status
-
-Verified on Stellar testnet on Nov 12, using testnet XLM's token contract as the
-payment token (the USDC faucet needs a captcha, so USDC itself is untested):
-
-| Piece | State |
-|---|---|
-| Contracts | Deployed. Unit tests pass (registry: 1, verified-seller policy: 4). |
-| Owner creates a mandate | Works (`scripts/create-mandate.ts`, signed by the owner's key). |
-| Agent pays a verified seller within its limit | Works, directly and through x402. |
-| Agent pays an unverified recipient | Refused by the account's contracts. |
-| Agent exceeds its limit | Refused by the account's contracts, directly and through x402. |
-| Receipts | Each payment is indexed from chain into a receipt, with what was bought attached. |
-| Dashboard | Works against testnet (checked in a browser): create an agent with a limit, send it to buy, see the receipt or the declined payment and why, revoke an agent. |
-| Owner sign-in, receipt email | Not started. |
-| Seller verification against `stellar.toml` | Not started; sellers are registered by hand. |
-
-### Deployed on testnet
-
-| Contract | Id |
-|---|---|
-| Smart account (demo owner) | `CBZCTZ3SYFZ4FMI43HHMQMH26YWWPTL7N4INLJZ3UGYKHIEJLIZFWZ3X` |
-| Verified-seller policy | `CBNGZVLAVZWXG6XGHDLOWPGLZA3FPZSSH5GU3KJZTFGG2ZZUQ33CBFGV` |
-| Seller registry | `CCGJDOFMPUARLPQN43PINZMV2VDLXTLPOCGJ7SYIVYJHWHMTLO7FG57C` |
-| Spending-limit policy | `CAMLQKBJZBLW2XMWWUSA66PCIJ6UMROY57FFVIIV4WWXZQEQLQRXH5XN` |
-| ed25519 verifier | `CAERXSDPAVY6H53I4UYMUUBMFVHJYZPULMUYCBTLDHTZTWJJCHNZBGNU` |
-
-Example x402 payment from the smart account:
-[`a628cbc5…`](https://stellar.expert/explorer/testnet/tx/a628cbc5c0343413cf04be6200333f0b84149b6c46cb9a4ace16976166445ad6)
-
-## Quick start
-
-Needs Node 24+ and pnpm.
+For a fresh checkout, install Node 24+, pnpm, Rust with the `wasm32v1-none` target,
+and the Stellar CLI, then run:
 
 ```bash
 pnpm install
+pnpm setup:payments
+pnpm setup:contracts
+pnpm dev
 ```
+
+`setup:payments` creates `.env` and a custody encryption key. Re-running it
+preserves existing supported settings and the key. `setup:contracts` builds the
+current contracts, uploads the account WASM, deploys missing shared contracts,
+and privately saves the registry administrator key. Existing configured contracts
+are reused. See [Stellar setup](docs/stellar-testnet.md).
+
+## Accounts and funding
+
+Choose **Accounts → Open account**, select Traditional or Stellar, and enter a name.
+Both start with zero visible balance.
+
+Traditional accounts use the fictional **Mandate Demo Bank**, a `DEMO-…` account
+number and a `BANK_DEMO_…` recipient reference. **Add funds** credits simulated USD
+directly to that account. Traditional payments transfer those balances between
+verified demo recipients. USD amounts accept up to two decimal places. There is
+no bank-provider integration or conversion between demo USD and XLM.
+
+For Stellar accounts, opening automatically provisions a dedicated Classic wallet,
+deploys the Smart contract, installs its payment policy, and registers the contract
+as a verified recipient. The Classic wallet holds testnet XLM for reserves and fees;
+the dashboard shows only the Smart contract's balance and C address.
+
+**Add funds** accepts an XLM amount and automatically:
+
+1. Deposits that amount into the account's mapped Classic wallet using the testnet funding provider.
+2. Transfers it into the mapped Smart contract.
+
+Both transactions are persisted independently before broadcast. Repeating the same
+request resumes an interrupted operation without depositing or transferring twice.
+Only confirmed funding is reported as successful. The provider uses Friendbot-funded
+source wallets and accepts amounts within their available testnet allowance.
+
+Stellar payments transfer XLM from one Smart contract to another verified Smart
+contract. Classic G addresses cannot be used as payment recipients. XLM amounts
+accept up to seven decimal places.
+
+The **Activity** tab shows funding and payments. Traditional entries are marked as
+simulated; Stellar entries include transaction hashes and explorer links.
+
+## Mandates and third-party payments
+
+A mandate grants a person or agent spending access to an existing account.
+Creating one does not open another account or create another balance.
+
+1. Open **Mandates** and choose Traditional or Stellar payment.
+2. Select a verified source account matching that method.
+3. Enter the holder, limit, period and expiry.
+4. Save the displayed payment credential, mandate ID and Pay link.
+
+Traditional mandates enforce limits in fixed 24-hour, 7-day or 30-day periods in
+the service. Stellar mandates install an on-chain signer with a rolling spending
+limit, ledger expiry and verified-recipient policy. The API also checks wall-clock
+expiry. Several mandates can share an account, each with its own allowance.
+Revocation blocks service access immediately; a pending on-chain revocation remains
+visible and retryable.
+
+The holder opens `/pay` without an owner login, enters the credential and payment
+details, and chooses **Check mandate & seller** before **Make payment**. Use the
+recipient's demo reference for Traditional payments or C address for Stellar payments.
+The Pay link contains the mandate ID and method, never its secret credential.
+
+Wrong credentials, incompatible payment methods, unverified recipients, exceeded
+limits, expiry, revocation and insufficient funds decline payment. Unchanged
+retries reuse the same request ID. Pending blockchain transactions are shown as
+pending rather than paid.
+
+## Seller verification
+
+Stellar verification uses **an on-chain registry entry keyed by the exact recipient
+Smart Account C address**. A valid address or seller display name alone does not
+establish verification.
+
+When opening an account, the service checks that the deployed contract responds
+to `get_context_rule(0)`. The registry administrator then calls
+`register(C_address, "workspace/<account-id>")`. The registry stores that address,
+metadata and verification ledger. Only its administrator can register or revoke entries.
+
+Before payment, the API calls `is_verified(C_address)`. The sender's payment policy
+checks that same registry during on-chain authorization. A mandate additionally
+checks its spending limit. Revoking a recipient's registry entry blocks later payments.
+
+The prototype automatically attests accounts it opens. It does not perform KYC,
+business verification or domain-ownership verification. Traditional verification is
+only a local demo flag.
+
+## Configuration and storage
+
+[.env.example](.env.example) lists all supported settings. Never commit `.env`.
+
+| Setting | Purpose |
+|---|---|
+| `PAYMENTS_CHAIN_DB` | Workspace, demo-bank ledger, encrypted custody vault and transaction journal; defaults to `workspace.sqlite` in the API directory |
+| `PAYMENTS_ENCRYPTION_KEY` | 32-byte hex custody key generated by `setup:payments` |
+| `PAYMENTS_RPC_URL` | Stellar testnet RPC endpoint |
+| `PAYMENTS_HORIZON_URL` | Testnet account activation lookup |
+| `PAYMENTS_FRIENDBOT_URL` | Testnet activation and funding provider |
+| `PAYMENTS_EXPLORER_URL` | Base URL for account and transaction links |
+| `SMART_ACCOUNT_WASM_HASH` | Uploaded account code used to deploy each Smart contract |
+| `ED25519_VERIFIER_ID` | Contract verifying account and mandate signatures |
+| `SPENDING_LIMIT_POLICY_ID` | On-chain mandate spending limits |
+| `SELLER_REGISTRY_ID` | Verified recipient registry |
+| `PAYMENTS_VERIFIED_SMART_POLICY_ID` | Policy requiring verified C-address recipients |
+| `PAYMENTS_REGISTRY_ADMIN_SECRET` | Testnet registry administrator key |
+| `STELLAR_SOURCE` | Stellar CLI identity used by `setup:contracts`; defaults to `mandate-deployer` |
+| `WEB_ORIGIN` | Allowed browser origin; defaults to `http://localhost:4020` |
+| `RECEIPTS_PORT` | Payments API port; defaults to `4022` |
+| `NODE_ENV` | Set to `production` for Secure session cookies; requires HTTPS |
+
+Signing keys and cached command responses are encrypted with AES-256-GCM. Passwords
+use salted scrypt hashes; sessions and payment credentials are stored as hashes.
+Demo-bank mutations commit atomically in SQLite. Stellar envelopes persist before
+broadcast and retain their original transaction IDs on retries.
+
+Keep the encryption key with its database. Changing keys or contract configuration
+requires a separate database. The current application opens only its current
+workspace schema and does not migrate other database layouts.
+
+## API
+
+| Route | Purpose |
+|---|---|
+| `POST /api/auth/register`, `/api/auth/login`, `/api/auth/logout` | Email/password sessions |
+| `GET /api/workspace` | Visible accounts, mandates and activity |
+| `POST /api/accounts/open` | Open with `type: "traditional"` or `"stellar"`, name and request ID |
+| `POST /api/accounts/:id/funding` | Add funds to that account; requires amount and request ID |
+| `POST /api/mandates` | Create a mandate on an existing source account |
+| `DELETE /api/mandates/:id` | Revoke a mandate |
+| `POST /api/payments` | Owner or delegate payment |
+| `POST /api/pay/preview`, `/api/pay` | Third-party checks and payment with an Authorization Bearer credential |
+| `GET /api/network`, `/api/health` | Testnet metadata and service status |
+
+Traditional successes have `settlement: "traditional-demo"` and a demo receipt ID.
+Stellar successes have `settlement: "stellar-testnet"`, a `txHash` and explorer link.
+Owner cookies do not replace the payment credential on the public Pay endpoints.
+
+## Checks
 
 ```bash
-pnpm setup:testnet
+pnpm typecheck
+pnpm test
+pnpm build
+pnpm test:contracts
 ```
 
-That creates merchant, agent and owner test accounts with USDC trustlines and
-writes them to `.env`. Then send testnet USDC to the `AGENT_ADDRESS` from
-https://faucet.circle.com (choose Stellar testnet).
-
-In four terminals:
+To verify real contract deployment, automatic funding, Smart-to-Smart payments,
+mandate limits and revocation with fresh wallets and testnet funds:
 
 ```bash
-pnpm dev:facilitator
+pnpm test:chain
 ```
 
-```bash
-pnpm dev:merchant
-```
-
-```bash
-pnpm dev:receipts
-```
-
-```bash
-pnpm dev:web
-```
-
-Open http://localhost:4020. From the dashboard you can create an agent with a
-spending limit, send it to buy something from the demo seller (one item is over
-most limits, one comes from an unverified look-alike seller), open the receipt
-or the declined payment, and revoke the agent.
-
-The same payment from the command line:
-
-```bash
-pnpm agent -- http://localhost:4021/weather
-```
-
-With `PAYER_MODE=classic` (the default) the agent pays from its own account and
-no mandate is involved. Set `PAYER_MODE=smart-account` in `.env` to pay from the
-smart account under the agent's mandate, once the contracts are deployed and a
-mandate exists (next section).
-
-To test without USDC, charge and pay in testnet XLM's token contract instead:
-set both `MERCHANT_ASSET` and `AGENT_EXTRA_ASSET` to
-`CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC` and pass the same
-value as `--token` to the scripts below.
-
-## Contracts
-
-Needs Rust with the `wasm32v1-none` target and the Stellar CLI:
-
-```bash
-brew install rustup stellar-cli && rustup default stable && rustup target add wasm32v1-none
-```
-
-Homebrew's rustup is not put on your PATH automatically. Add this to `~/.zshrc`:
-
-```bash
-export PATH=/opt/homebrew/opt/rustup/bin:$PATH
-```
-
-```bash
-cd contracts && cargo test && stellar contract build
-```
-
-If the build fails with `ld: ... tapi error: malformed file ... unknown architecture`,
-the Command Line Tools are defaulting to a macOS SDK newer than their linker
-understands. Point the build at the SDK that matches your macOS version, for example:
-
-```bash
-export SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk
-```
-
-```bash
-./scripts/deploy-contracts.sh
-```
-
-### Create a mandate
-
-1. Deploy the owner's smart account. The owner's key goes on the default rule
-   as an `External` signer (verifier contract + raw public key in hex):
-
-   ```bash
-   stellar contract deploy --network testnet --source mandate-deployer \
-     --wasm contracts/target/wasm32v1-none/release/mandate_account.wasm \
-     -- --name owner --policies '{}' \
-     --signers '[{"External": ["<ED25519_VERIFIER_ID>", "<owner public key, hex>"]}]'
-   ```
-
-   Put the printed id in `.env` as `SMART_ACCOUNT_ID`.
-
-2. Register the demo seller (the registry admin is the deployer identity):
-
-   ```bash
-   stellar contract invoke --network testnet --source mandate-deployer --id <SELLER_REGISTRY_ID> -- register --seller <MERCHANT_ADDRESS> --domain localhost:4021
-   ```
-
-3. Create the agent's mandate, signed by the owner. Defaults: USDC, limit 1 per day.
-
-   ```bash
-   node --env-file=.env scripts/create-mandate.ts --limit 5
-   ```
-
-   Put the printed rule id in `.env` as `AGENT_CONTEXT_RULE_ID`.
-
-4. Move funds from the owner's classic account into the smart account:
-
-   ```bash
-   node --env-file=.env scripts/fund-smart-account.ts --amount 10
-   ```
-
-5. Try the rules directly, without x402:
-
-   ```bash
-   node --env-file=.env scripts/agent-transfer.ts --to <MERCHANT_ADDRESS> --amount 1
-   ```
-
-## Demo shortcuts to know about
-
-The dashboard is real against testnet, but three things are simplified:
-
-- **The API signs as the owner.** `apps/receipts` holds `OWNER_SECRET` so the
-  dashboard can create and revoke mandates without a wallet. A real deployment
-  has the owner sign with their own wallet or a passkey.
-- **The API holds agent keys.** "Send to buy" runs the agent's purchase from the
-  API, so it keeps each agent's key in its local database. A real agent holds its
-  own key.
-- **No sign-in.** The API has no authentication. Run it on localhost only.
-
-When a payment is refused, the network only says "not authorized". The reason
-shown ("Over the daily spending limit", "Seller is not verified") is worked out
-by the API from the mandate's limit and the seller registry.
-
-## What we learned about x402 and smart accounts
-
-Hosted x402 facilitators do not settle payments from a smart account that has
-policies. Tested against `https://x402.org/facilitator`:
-
-- **Fee ceiling.** The stock facilitator sponsors at most 50,000 stroops
-  (0.005 XLM) per payment. A mandate payment runs the signature verifier and two
-  policies on-chain and costs about 525,000 stroops (0.05 XLM).
-- **Event check.** The stock facilitator requires a payment to emit exactly one
-  contract event, the token transfer. Our policies emit two more.
-
-`apps/facilitator` is the stock facilitator code with a higher ceiling and with
-events from our two policy contracts ignored. The second change overrides a
-private method of `@x402/stellar`, so that package is pinned to an exact version.
-
-Other things worth knowing:
-
-- The stock x402 client can't sign for a smart account. `apps/agent/src/smart-account-scheme.ts`
-  replaces its signing step; the signing logic lives in `packages/shared/src/smart-account.ts`.
-- When a policy rejects a payment, the network reports a generic
-  `Error(Auth, InvalidAction)`, not which rule failed.
-- The Stellar CLI reads `.env` files in parent directories. A variable named
-  `STELLAR_RPC_URL` there breaks CLI commands, which is why ours is `RPC_URL`.
-- The x402 client has its own spending caps, but they run inside the agent's
-  process. Ours are enforced by the account on-chain, whatever the agent runs.
-
-## Credits
-
-Smart account, verifier and spending-limit code come from
-[OpenZeppelin Stellar Contracts](https://github.com/OpenZeppelin/stellar-contracts) (MIT).
-Payments use [x402](https://developers.stellar.org/docs/build/agentic-payments/x402).
+Public verification receipts are in
+[stellar-account-verification.json](docs/stellar-account-verification.json).
+Traditional banking is simulated and Stellar payments use testnet only.

@@ -1,0 +1,73 @@
+{
+  "network": "stellar:testnet",
+  "policy": "CDUOUHZNVEWW6J4ELPK6DGHGO7RGBCQ54TNSE6AOTLUTCL5GYE7FJHGQ",
+  "privatePairs": [
+    {
+      "accountId": "STELLAR_427280bb41ecf69674bc6dfdc6a66f49",
+      "classicAddress": "GDNQRIH3APQJIWPT3FPYUE6TEZRER3OHSMVXCWXDBK23D3CHDK2IE2VZ"
+    },
+    {
+      "accountId": "STELLAR_831394616284a8ff7f3b7eddff91cdbf",
+      "classicAddress": "GA5PPQVOIMSL3C275X7VSW2NCIZGCWOMO3DTAJCB5YMQTLXDQQHFYT3Y"
+    }
+  ],
+  "traditionalDemo": {
+    "source": "BANK_DEMO_E77DD221260DC4C687C5",
+    "recipient": "BANK_DEMO_01B8E80809D0BB382F0F",
+    "paymentId": "demo_ef4a7214-6c52-461b-8a01-17e182f65c14"
+  },
+  "smart": "CCUYNCO4ENUJEZNYOSNT2GH4K3UFOZJA77NFEMAJSBUAWFNBAPTHXFYT",
+  "seller": "CDQ3LVW5GHSARYCM5YQHJJTG7FP3SYAJCIT4IVVK45ZD6N6R72GIFXH4",
+  "mandate": {
+    "id": "ee8f3a9ecb23d4f8236b6f698e017139",
+    "account": "CCUYNCO4ENUJEZNYOSNT2GH4K3UFOZJA77NFEMAJSBUAWFNBAPTHXFYT"
+  },
+  "checks": [
+    "login holds no funds",
+    "one-to-one private mapping",
+    "single Add funds deposits then forwards",
+    "Smart to Smart payment",
+    "third-party without owner session",
+    "idempotent retry",
+    "wrong credential rejected",
+    "Classic recipient rejected",
+    "unverified Smart recipient rejected",
+    "spending limit enforced on chain",
+    "revocation enforced on chain"
+  ],
+  "receipts": [
+    {
+      "step": "Smart opening",
+      "txHash": "1eec51240a54a1c4c6afaa6d1a941274a94f94a7d95ff1c2355d0d7c2023d438"
+    },
+    {
+      "step": "Smart verification",
+      "txHash": "1ae02ba4dcc4a29e5a7e4fd593b95dad595cec880e5681837cd45bdd875c94ac"
+    },
+    {
+      "step": "Seller opening",
+      "txHash": "ee531459c681051a1aa2610184189317b40cde350935c4e7f953467ac86cdf29"
+    },
+    {
+      "step": "Seller verification",
+      "txHash": "89607faa852b9f69ccd97643cc29a10d701601aaae6d3400d61aa557699fcfae"
+    },
+    {
+      "step": "Fund smart",
+      "txHash": "615658395a9c1de6b457c46655024c92bc58cee0b0ef2bcd972fe84a329138ca"
+    },
+    {
+      "step": "Smart-to-Smart payment",
+      "txHash": "60674e7b8655cc17c2b69540e0838a302e3d7bb3955acccfc30152163a0ed6a0"
+    },
+    {
+      "step": "Third-party /pay payment",
+      "txHash": "ed4af872124ae7363c38a197ddaa05b7cffcecab02b8915a53f2818185dbae8f"
+    }
+  ],
+  "fundingTransactions": {
+    "amount": "5",
+    "depositTxHash": "703861f843ac03ad0770281001a3c9989773ab8c2f005fd6310f188aa15e2839",
+    "forwardingTxHash": "615658395a9c1de6b457c46655024c92bc58cee0b0ef2bcd972fe84a329138ca"
+  }
+}
