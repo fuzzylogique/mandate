@@ -1,0 +1,22 @@
+{
+  "name": "@mandate/langchain",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "pay": "node --env-file-if-exists=../../.env src/cli.ts",
+    "test": "node --test src/*.test.ts",
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@langchain/core": "^1.4.1",
+    "@mandate/shared": "workspace:*",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  }
+}

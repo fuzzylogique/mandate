@@ -13,6 +13,8 @@ export interface Customer {
 
 export interface SpendingAccount {
   id: string;
+  /** Stable numeric identifier to share for mandate seller restrictions. */
+  sellerId?: number;
   ownerId: string;
   name: string;
   rail: PaymentRail;
@@ -48,6 +50,8 @@ export interface AccountMandate {
   currency?: string;
   chainRevocationPending?: boolean;
   verifiedRecipientsOnly?: boolean;
+  /** Empty or absent permits any verified seller. Checked at payment time. */
+  sellerIds?: number[];
 }
 
 export interface PaymentEntry {
@@ -124,6 +128,7 @@ export interface CreateAccountMandateInput {
   limit: string;
   period: SpendingPeriod;
   expiresAt: string;
+  sellerIds?: number[];
   requestId?: string;
 }
 

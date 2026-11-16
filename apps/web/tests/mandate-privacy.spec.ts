@@ -278,7 +278,7 @@ test("new account confirmation masks and copies its Smart Account address", asyn
   await mockClipboard(page);
   await page.route("**/api/accounts/open", async route => {
     expect(route.request().postDataJSON()).not.toHaveProperty("type");
-    await route.fulfill({ status: 201, json: { account } });
+    await route.fulfill({ status: 201, json: { account: { ...account, sellerId: 101 } } });
   });
   await page.goto("/accounts/new");
   await expect(page.getByRole("radio")).toHaveCount(0);
@@ -286,10 +286,52 @@ test("new account confirmation masks and copies its Smart Account address", asyn
   await page.getByLabel("Account name", { exact: true }).fill("Operations");
   await page.getByRole("button", { name: "Open account", exact: true }).click();
   const addressField = page.getByLabel("Smart Account address", { exact: true });
+  await expect(page.getByLabel("Seller ID", { exact: true })).toHaveCount(0);
   await expect(addressField).toHaveAttribute("type", "password");
   await expect(addressField).not.toHaveValue(account.address!);
   await page.getByRole("button", { name: "Copy Smart Account address", exact: true }).click();
   await expect(page.getByRole("status")).toHaveText("Copied to clipboard.");
   expect(await copiedValues(page)).toEqual([account.address]);
   await expect(addressField).toHaveAttribute("type", "password");
+});
+
+test("seller IDs are entered as numbers and saved with a mandate", async ({ page }) => {
+  await mockWorkspace(page);
+  let requests = 0;
+  await page.route("**/api/mandates", async route => {
+    requests++;
+    const input = route.request().postDataJSON();
+    expect(input.sellerIds).toEqual([101, 202, 303]);
+    await route.fulfill({ status: 201, json: { mandate: { ...mandate, reference: "restricted", sellerIds: input.sellerIds }, mandateId } });
+  });
+  await page.goto("/mandates");
+  const sellerIds = page.getByLabel("Seller IDs (optional)", { exact: true });
+  await expect(sellerIds).toHaveAttribute("type", "text");
+  await expect(page.getByRole("combobox", { name: /Seller/ })).toHaveCount(0);
+  await page.getByLabel("Mandate name", { exact: true }).fill("Restricted purchasing");
+  await page.getByLabel("Mandate holder", { exact: true }).fill("Buyer");
+  await page.getByLabel("Spending limit (USD)", { exact: true }).fill("10");
+  for (const invalid of ["seller", "1.5", "-1", "101,,202"]) {
+    await sellerIds.fill(invalid);
+    await page.getByRole("button", { name: "Create mandate", exact: true }).click();
+    expect(await sellerIds.evaluate((input: HTMLInputElement) => input.validity.patternMismatch)).toBe(true);
+    expect(requests).toBe(0);
+  }
+  await sellerIds.fill(" 101, 202 303 ");
+  await page.getByRole("button", { name: "Create mandate", exact: true }).click();
+  const created = page.locator(".mandate-form-card");
+  await expect(created.getByText("Allowed seller IDs: 101, 202, 303", { exact: true })).toBeVisible();
+  expect(requests).toBe(1);
+  await created.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(page.getByLabel("Seller IDs (optional)", { exact: true })).toHaveValue("");
+});
+
+test("accounts hide internal seller IDs and saved mandate restrictions remain visible", async ({ page }) => {
+  await mockWorkspace(page);
+  await page.route("**/api/workspace", route => route.fulfill({ json: { ...workspace, accounts: [{ ...account, sellerId: 101 }], mandates: [{ ...mandate, sellerIds: [202, 303] }] } }));
+  await page.goto("/");
+  await expect(page.getByLabel("Seller ID", { exact: true })).toHaveCount(0);
+  await expect(page.getByText(/seller ID/i)).toHaveCount(0);
+  await page.goto("/mandates");
+  await expect(page.getByText("Allowed seller IDs: 202, 303", { exact: true })).toBeVisible();
 });

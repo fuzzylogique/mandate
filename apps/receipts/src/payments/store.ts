@@ -39,15 +39,18 @@ export interface MandateRecord extends Omit<AccountMandate, "reference" | "enfor
   enforcement?: "service" | "on-chain";
   rail?: "traditional" | "blockchain";
 }
-export function validateMandateInput(body: Record<string, unknown>): Pick<AccountMandate, "name" | "recipientType" | "recipient" | "limit" | "period" | "expiresAt"> {
+export function validateMandateInput(body: Record<string, unknown>): Pick<AccountMandate, "name" | "recipientType" | "recipient" | "limit" | "period" | "expiresAt" | "sellerIds"> {
   requireThat(body.recipientType === "person" || body.recipientType === "agent", 400, "Choose a person or agent");
   requireThat(body.period === "day" || body.period === "week" || body.period === "month", 400, "Choose a spending period");
   const expiry = typeof body.expiresAt === "string" ? Date.parse(body.expiresAt) : NaN;
   requireThat(Number.isFinite(expiry) && expiry > Date.now(), 400, "Expiry must be in the future");
+  const sellerIds = body.sellerIds === undefined ? [] : body.sellerIds;
+  requireThat(Array.isArray(sellerIds) && sellerIds.length <= 100 && sellerIds.every(id => Number.isSafeInteger(id) && id > 0), 400, "Seller IDs must be a list of up to 100 positive whole numbers");
   return {
     name: text(body.name, "Mandate name"), recipientType: body.recipientType,
     recipient: body.recipientType === "person" ? email(body.recipient) : text(body.recipient, "Agent identifier"),
     limit: decimal(amount(body.limit)), period: body.period, expiresAt: new Date(expiry).toISOString(),
+    ...(sellerIds.length ? { sellerIds: [...new Set<number>(sellerIds)].sort((a, b) => a - b) } : {}),
   };
 }
 export interface EntryRecord extends Omit<PaymentEntry, "mandateReference"> { mandateId: string | null; ownerId: string; actorId: string; requestId?: string }
@@ -57,6 +60,7 @@ export interface State {
   customers: CustomerRecord[];
   schemaVersion: 1;
   accounts: SpendingAccount[];
+  nextSellerId?: number;
   stellarPairs: StellarAccountPair[];
   mandates: MandateRecord[];
   entries: EntryRecord[];
@@ -94,6 +98,8 @@ export class WorkspaceStore {
         delete previous.tokenHash;
       }
     });
+    // Backfill existing accounts once; IDs persist independently of names or addresses.
+    if (this.read().accounts.some(account => account.sellerId === undefined)) this.update(() => {});
   }
   close() { this.db.close(); }
   /** Internal repository access, shared with the chain-backed service. Never exposed over HTTP. */
@@ -106,6 +112,14 @@ export class WorkspaceStore {
     try {
       const state = this.read();
       const result = fn(state);
+      let nextSellerId = state.accounts.reduce((next, account) => Math.max(next, (account.sellerId ?? 0) + 1), state.nextSellerId ?? 1);
+      for (const account of state.accounts) {
+        if (account.sellerId === undefined) {
+          requireThat(Number.isSafeInteger(nextSellerId), 503, "Seller ID capacity reached");
+          account.sellerId = nextSellerId++;
+        }
+      }
+      state.nextSellerId = nextSellerId;
       this.db.prepare("UPDATE payment_workspace SET body=? WHERE id=1").run(JSON.stringify(state));
       this.db.exec("COMMIT");
       return result;

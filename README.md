@@ -81,7 +81,7 @@ agent spending access to an existing Smart Account's USD balance.
 Creating one does not open an account or create another balance.
 
 1. Open **Mandates** and select a verified source account.
-2. Enter the holder, USD limit, rolling period and expiry.
+2. Enter the holder, USD limit, rolling period and expiry. Optionally type seller IDs separated by commas or spaces (for example, `101, 202, 303`).
 3. Use **Show mandate** to reveal and save the secret mandate ID. The Pay link is simply `/pay`.
 
 Every new mandate installs an on-chain signer and an asset-scoped contract rule,
@@ -90,6 +90,15 @@ The API also checks wall-clock expiry. Several mandates can share an account,
 each with its own allowance. A USD mandate cannot authorize an XLM transfer.
 Revocation disables the secret ID immediately; pending on-chain revocation remains
 visible and retryable until the rule is removed.
+
+Each account has a stable numeric seller ID kept internally and assigned
+automatically to existing accounts. A mandate accepts up to 100 positive whole-number
+seller IDs; duplicates are removed. An empty list allows any verified seller.
+Creation validates only the list format, so sellers need not exist or be verified yet.
+At payment preview and submission, the service matches the actual destination address
+to its seller ID and enforces the list. Seller verification is still required at payment
+time and enforced on chain; the numeric seller list is enforced by the payment service.
+The API accepts the optional field as `sellerIds: [101, 202, 303]`.
 
 The holder opens `/pay` without an owner login, enters the secret mandate ID and
 the seller's Smart Account C address copied from their dashboard, then checks and
@@ -187,6 +196,14 @@ Public Pay endpoints require the secret `mandateId` in the JSON body. They do no
 use an owner cookie or a separate Authorization Bearer token. The owner-authenticated
 creation response is `{ mandate, mandateId }`; its `mandate.reference` is not a
 payment authorization. Secrets are never put in links, receipts or on-chain arguments.
+
+## LangChain module
+
+[`packages/langchain`](packages/langchain/README.md) provides a standalone
+LangChain payment tool and CLI example. It reads a secret mandate ID and seller
+Smart Account address, then calls `/api/pay` with an explicit USD amount,
+reference and stable request ID. Run it with `pnpm pay:langchain`; see the module
+README for configuration and import examples.
 
 ## Checks
 

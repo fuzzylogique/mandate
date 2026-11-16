@@ -875,3 +875,66 @@ test("one account can be opened without a type and funded by FIAT or automatic T
     assert.equal(workspace.activity.length, 2);
   } finally { service.close(); }
 });
+
+test("seller restrictions are saved without verification and enforced for every mandate payment path", async () => {
+  const { chain, service, owner } = await fixture();
+  try {
+    const source = await service.createAccount(owner, { name: "Source", requestId: "source" });
+    const registered = await service.register({ name: "Seller", email: "seller@example.com", password: "long seller password" });
+    const holder = service.authenticate(registered.token);
+    const allowed = await service.createAccount(holder, { name: "Allowed", requestId: "allowed" });
+    const blocked = await service.createAccount(owner, { name: "Blocked", requestId: "blocked" });
+    assert.ok(Number.isSafeInteger(allowed.sellerId));
+    assert.notEqual(allowed.sellerId, blocked.sellerId);
+    await service.fund(owner, source.id, { amount: "10", requestId: "fund" });
+    const details = { accountId: source.id, name: "Restricted", recipientType: "person", recipient: "seller@example.com", limit: "10", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), sellerIds: [999999, allowed.sellerId!, allowed.sellerId!], requestId: "restricted" };
+    const verify = chain.isVerifiedSmartAccount.bind(chain);
+    chain.isVerifiedSmartAccount = async () => { throw new Error("Creation must not verify sellers"); };
+    const created = await service.createMandate(owner, details);
+    chain.isVerifiedSmartAccount = verify;
+    assert.deepEqual(created.mandate.sellerIds, [allowed.sellerId, 999999]);
+    assert.deepEqual((await service.workspace(holder)).shared[0]!.mandate.sellerIds, created.mandate.sellerIds);
+    await assert.rejects(service.createMandate(owner, { ...details, sellerIds: [blocked.sellerId!] }), { status: 409 });
+
+    const input = { mandateId: created.mandateId, sellerAddress: blocked.address, sellerName: allowed.name, sellerId: allowed.sellerId, amount: "1", reference: "Purchase", requestId: "blocked-public" };
+    const preview = await service.previewMandatePayment(input);
+    assert.equal(preview.seller.verified, true);
+    assert.equal(preview.checks.find(check => check.label.includes("seller ID list"))!.passed, false);
+    const before = chain.transfers.length;
+    await assert.rejects(service.payWithMandate(input), { status: 403, message: "Seller is not in this mandate's allowed seller ID list" });
+    for (const actor of [owner, holder]) {
+      await assert.rejects(service.pay(actor, { accountId: source.id, mandateReference: created.mandate.reference, destination: blocked.address, amount: "1", reference: "Purchase", requestId: `blocked-${actor.id}` }), { status: 403 });
+    }
+    assert.equal(chain.transfers.length, before);
+    assert.equal(await chain.spent(chain.wallet(source.id), created.mandate.ruleId!), 0n);
+
+    chain.verified.delete(allowed.address!);
+    const allowedInput = { ...input, sellerAddress: allowed.address, requestId: "allowed" };
+    const unverified = await service.previewMandatePayment(allowedInput);
+    assert.equal(unverified.checks.find(check => check.label.includes("seller ID list"))!.passed, true);
+    assert.equal(unverified.seller.verified, false);
+    await assert.rejects(service.payWithMandate(allowedInput), { status: 403, message: "Seller is not a verified smart account" });
+    chain.verified.add(allowed.address!);
+    const paid = await service.payWithMandate(allowedInput);
+    assert.equal(paid.destination, allowed.address);
+    assert.equal((await service.payWithMandate(allowedInput)).id, paid.id);
+    assert.equal(chain.transfers.length, before + 1);
+    assert.equal((await service.workspace(owner)).mandates[0]!.spent, "1");
+  } finally { service.close(); }
+});
+
+test("a seller ID may be listed before its account exists and remains stable on account retries", async () => {
+  const { service, owner } = await fixture();
+  try {
+    const source = await service.createAccount(owner, { name: "Source", requestId: "source" });
+    const futureId = source.sellerId! + 1;
+    const created = await service.createMandate(owner, { accountId: source.id, name: "Future seller", recipientType: "agent", recipient: "Buyer", limit: "1", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), sellerIds: [futureId], requestId: "future" });
+    const sellerInput = { name: "Future seller", requestId: "seller" };
+    const seller = await service.createAccount(owner, sellerInput);
+    assert.equal(seller.sellerId, futureId);
+    assert.equal((await service.createAccount(owner, sellerInput)).sellerId, futureId);
+    await service.fund(owner, source.id, { amount: "1", requestId: "fund" });
+    assert.equal((await service.previewMandatePayment({ mandateId: created.mandateId, sellerAddress: seller.address, amount: "1" })).checks.every(check => check.passed), true);
+    await service.payWithMandate({ mandateId: created.mandateId, sellerAddress: seller.address, amount: "1", reference: "Future purchase", requestId: "pay" });
+  } finally { service.close(); }
+});

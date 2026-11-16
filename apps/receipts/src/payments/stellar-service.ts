@@ -56,7 +56,7 @@ export class StellarPaymentService {
   private decorate(account: SpendingAccount): SpendingAccount {
     const wallet = this.chain.wallet(account.id);
     const { balances: _legacyBalances, ...details } = account as SpendingAccount & { balances?: unknown };
-    return { ...details, currency: "USD", address: wallet.address, network: this.network.id, explorerUrl: `${this.network.explorerUrl}/contract/${wallet.address}` };
+    return { ...details, sellerId: this.core.read().accounts.find(saved => saved.id === account.id)?.sellerId, currency: "USD", address: wallet.address, network: this.network.id, explorerUrl: `${this.network.explorerUrl}/contract/${wallet.address}` };
   }
   private record(input: Omit<EntryRecord, "id" | "createdAt" | "settlement">, receipt: ChainReceipt): PaymentEntry {
     const id = receipt.txHash;
@@ -129,7 +129,7 @@ export class StellarPaymentService {
       this.assertPairs(state.stellarPairs);
       const index = state.accounts.findIndex(existing => existing.id === account.id);
       if (index < 0) state.accounts.push(provisioned);
-      else state.accounts[index] = provisioned;
+      else state.accounts[index] = { ...provisioned, sellerId: state.accounts[index]!.sellerId };
     });
     return { ...this.decorate(provisioned), balance: decimal(await this.chain.balance(created, account.currency)) };
   }
@@ -185,7 +185,7 @@ export class StellarPaymentService {
     const validated = validateMandateInput(body);
     const currency = this.currency(body.currency);
     const id = digest(commandId).slice(0, 32);
-    const details = { accountId: account.id, currency, name: validated.name, recipient: validated.recipient, recipientType: validated.recipientType, limit: validated.limit, period: validated.period, expiresAt: validated.expiresAt };
+    const details = { accountId: account.id, currency, name: validated.name, recipient: validated.recipient, recipientType: validated.recipientType, limit: validated.limit, period: validated.period, expiresAt: validated.expiresAt, ...(validated.sellerIds ? { sellerIds: validated.sellerIds } : {}) };
     await this.chain.command(commandId, details, async () => {
       const { ruleId } = await this.chain.addMandate(id, this.classicWallet(account), this.chain.wallet(account.id), { name: validated.name, limit: BigInt(toBaseUnits(validated.limit)), period: validated.period!, expiresAt: validated.expiresAt, currency });
       const mandateId = this.chain.secret(`token:${id}`, () => `mnd_${randomBytes(32).toString("base64url")}`);
@@ -244,6 +244,7 @@ export class StellarPaymentService {
         requireThat(mandate.ruleId !== undefined, 409, "The mandate payment rule is missing");
         requireThat(mandate.status === "active" && mandate.expiresAt > timestamp(), 403, "This mandate has expired or been revoked");
         if (!recovering) {
+          requireThat(this.sellerAllowed(mandate, destination), 403, "Seller is not in this mandate's allowed seller ID list");
           const spent = await this.chain.spent(this.chain.wallet(account.id), mandate.ruleId);
           requireThat(spent + units <= BigInt(toBaseUnits(mandate.limit)), 403, "Payment exceeds the mandate's spending limit");
         }
@@ -265,6 +266,12 @@ export class StellarPaymentService {
     const currency = value ?? "USD";
     requireThat(currency === "USD", 400, "Payments and mandates use USD. Create a new USD mandate to replace an older XLM mandate.");
     return currency;
+  }
+  private sellerAllowed(mandate: MandateRecord, address: string): boolean {
+    if (!mandate.sellerIds?.length) return true;
+    // Resolve the actual payment destination; never trust a caller-supplied seller ID or name.
+    const seller = this.core.read().accounts.find(account => account.address === address);
+    return seller?.sellerId !== undefined && mandate.sellerIds.includes(seller.sellerId);
   }
   private paymentMandate(value: unknown) {
     const actor = this.core.authenticateMandate(value);
@@ -291,6 +298,7 @@ export class StellarPaymentService {
       checks: [
         { label: "Mandate is active and has not expired", passed: mandate.status === "active" && mandate.expiresAt > timestamp() },
         { label: "Seller is a verified smart account", passed: verified },
+        ...(mandate.sellerIds?.length ? [{ label: "Seller is in the mandate's allowed seller ID list", passed: this.sellerAllowed(mandate, sellerAddress) }] : []),
         { label: "Recipient is different from the source account", passed: sellerAddress !== wallet.address },
         { label: "Payment is within the remaining spending limit", passed: spent + units <= BigInt(toBaseUnits(mandate.limit)) },
         { label: "Mandate account has sufficient funds", passed: balance >= units },
