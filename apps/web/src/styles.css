@@ -462,6 +462,7 @@ a {
 .shopper-actions {
   display: flex;
   align-items: center;
+  flex-wrap: wrap;
   gap: 8px;
   margin-top: 18px;
   min-height: 44px;
@@ -894,6 +895,7 @@ a {
 
 .text-field input::placeholder {
   color: var(--ink-2);
+  opacity: 0.55;
   font-weight: 400;
 }
 
@@ -1268,4 +1270,401 @@ a {
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
   }
+}
+
+/* ---------- Combined app: sign-in, requests, kinds, pairing, proof ---------- */
+
+.button.is-wide {
+  width: 100%;
+}
+
+.link-button {
+  background: none;
+  border: 0;
+  padding: 0;
+  white-space: nowrap;
+  color: var(--accent);
+  font: inherit;
+  font-weight: 500;
+}
+
+.link-button:hover:not(:disabled) {
+  text-decoration: underline;
+}
+
+.link-button:disabled {
+  color: var(--ink-2);
+}
+
+/* Sign in */
+.sign-in {
+  display: grid;
+  grid-template-columns: minmax(0, 440px);
+  justify-content: center;
+  align-content: center;
+  min-height: calc(100vh - 140px);
+  padding: 24px 16px;
+}
+
+.sign-in-card {
+  width: 100%;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 18px;
+}
+
+.sign-in-card h1 {
+  font-size: 26px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  line-height: 1.2;
+}
+
+.sign-in-card .form {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 12px;
+}
+
+.segmented {
+  display: flex;
+  padding: 4px;
+  border-radius: 22px;
+  border: 1px solid var(--glass-border);
+  background: var(--glass);
+}
+
+.segmented button {
+  flex: 1;
+  white-space: nowrap;
+  height: 36px;
+  border-radius: 18px;
+  background: none;
+  color: var(--ink-2);
+  font-size: 14px;
+  font-weight: 500;
+}
+
+.segmented button.is-on {
+  background: var(--lens);
+  color: var(--lens-ink);
+}
+
+/* First run */
+.welcome {
+  display: grid;
+  gap: 16px;
+  max-width: 620px;
+  margin: 24px auto;
+}
+
+.welcome h2 {
+  font-size: 22px;
+  font-weight: 500;
+}
+
+.welcome .button {
+  justify-self: start;
+}
+
+.hero-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+}
+
+.hero-row .capsule {
+  margin: 0;
+}
+
+/* Needs you */
+.needs-you h2 {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.request-list {
+  display: grid;
+  gap: 12px;
+}
+
+.request {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  align-items: center;
+  gap: 8px 18px;
+  padding: 18px 20px;
+  border-radius: 24px;
+  border-color: var(--blocked-border);
+}
+
+.request-title {
+  font-size: 15px;
+}
+
+.request-amount {
+  font-size: 22px;
+  font-weight: 500;
+  letter-spacing: -0.02em;
+  text-align: right;
+}
+
+.request-actions {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 6px;
+}
+
+/* New shopper: who shops */
+.kind-list {
+  display: grid;
+  gap: 10px;
+}
+
+.kind-option {
+  display: flex;
+  align-items: flex-start;
+  gap: 14px;
+  width: 100%;
+  padding: 16px;
+  border-radius: 20px;
+  text-align: left;
+  transition: background 0.15s ease;
+}
+
+.kind-option:hover {
+  background: var(--glass-hover);
+}
+
+.kind-option strong {
+  display: block;
+  font-size: 15px;
+  font-weight: 500;
+}
+
+.kind-option .quiet {
+  display: block;
+  font-size: 13px;
+}
+
+.kind-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 40px;
+  height: 40px;
+  border-radius: 50%;
+  background: var(--accent-soft);
+  color: var(--accent);
+}
+
+/* Shopper cards */
+.shopper-kind {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 12px;
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.shopper-job {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--hairline);
+  font-size: 13px;
+}
+
+.shopper.is-waiting {
+  border-style: dashed;
+}
+
+/* Pairing an assistant */
+.connect {
+  display: grid;
+  gap: 12px;
+}
+
+.code {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  padding: 14px 18px;
+  border-radius: 18px;
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+  font-size: 22px;
+  font-weight: 600;
+  letter-spacing: 0.12em;
+}
+
+.code-copy {
+  color: var(--accent);
+  font-family: "Sora", ui-sans-serif, system-ui, sans-serif;
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+}
+
+.connect-steps {
+  display: grid;
+  gap: 8px;
+  padding-left: 20px;
+  color: var(--ink-2);
+  font-size: 13px;
+  list-style: decimal;
+}
+
+.connect-steps code {
+  padding: 1px 6px;
+  border-radius: 6px;
+  background: var(--glass);
+  color: var(--ink);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+/* Stores */
+.stores-sub {
+  margin-top: 14px;
+  color: var(--ink-2);
+  font-size: 12px;
+  font-weight: 500;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+.store-mark.is-not {
+  display: grid;
+  place-items: center;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 1.5px solid var(--blocked);
+  color: var(--blocked);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.activity-row.is-added .activity-amount {
+  color: var(--ok);
+}
+
+/* Shared spending */
+.offer-list {
+  display: grid;
+  gap: 4px;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.offer-list li {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 0;
+  border-bottom: 1px solid var(--hairline);
+}
+
+.offer-list li > span:first-child {
+  flex: 1;
+  min-width: 0;
+}
+
+.offer-list strong,
+.offer-list .quiet {
+  display: block;
+}
+
+.offer-list strong {
+  font-weight: 500;
+}
+
+.offer-list .button {
+  height: 36px;
+  padding: 0 14px;
+}
+
+.not-trusted {
+  margin-left: 8px;
+  color: var(--blocked);
+  font-style: normal;
+}
+
+/* Receipt proof */
+.proof {
+  display: grid;
+  gap: 12px;
+  margin-top: 14px;
+  padding-top: 14px;
+  border-top: 1px solid var(--hairline);
+}
+
+.proof-checks {
+  display: grid;
+  gap: 6px;
+  font-size: 13px;
+}
+
+.proof-checks li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--ok);
+}
+
+.proof-rows > div {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  padding: 5px 0;
+  font-size: 13px;
+}
+
+.proof-rows dt {
+  color: var(--ink-2);
+}
+
+.proof-rows code {
+  font-family: ui-monospace, "SF Mono", Menlo, monospace;
+}
+
+@media (max-width: 560px) {
+  .request {
+    grid-template-columns: 1fr;
+  }
+
+  .request-amount {
+    text-align: left;
+  }
+
+  .request-actions .button {
+    flex: 1;
+  }
+}
+
+.topbar-side .link-button {
+  flex: none;
+  font-size: 14px;
+}
+
+@media (max-width: 420px) {
+  .topbar-side .owner-name {
+    display: none;
+  }
+}
+
+.hint-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
 }

@@ -1,6 +1,6 @@
-// Everything shoppers did with the owner's money: purchases that went through,
-// and payments the account blocked.
-import type { Activity } from "@mandate/shared";
+// Everything that happened with the owner's money: purchases, blocked
+// attempts, and money added.
+import type { Activity } from "@mandate/shared/api";
 import { money, when } from "./format.ts";
 import { ChevronIcon } from "./icons.tsx";
 
@@ -18,31 +18,28 @@ export function ActivityList({ items, freshIds, onOpen }: ActivityListProps) {
   return (
     <ul className="activity">
       {items.map((item) => {
-        const blocked = item.kind === "declined";
+        const blocked = item.kind === "blocked";
+        const added = item.kind === "added";
+        const who = item.paidBy === "you" ? `you, for ${item.shopper?.name ?? "a shopper"}` : item.shopper?.name ?? "";
         return (
           <li key={item.id}>
             <button
-              className={`activity-row ${blocked ? "is-blocked" : ""} ${freshIds.has(item.id) ? "is-fresh" : ""}`}
+              className={`activity-row ${blocked ? "is-blocked" : ""} ${added ? "is-added" : ""} ${freshIds.has(item.id) ? "is-fresh" : ""}`}
               onClick={() => onOpen(item)}
             >
               <span className="activity-main">
-                <span className="activity-store">{blocked ? `Blocked: ${item.seller.name}` : item.seller.name}</span>
+                <span className="activity-store">
+                  {added ? "Money added" : blocked ? `Blocked: ${item.store?.name ?? "a store"}` : item.store?.name}
+                </span>
                 <span className="quiet">
-                  {blocked
-                    ? `${item.reason ?? "Blocked by your account's rules"}. Nothing was paid.`
-                    : `${item.item} · ${item.agent.name}`}
+                  {added ? "Demo bank transfer" : blocked ? `${item.reason ?? "Blocked by your account's rules"}. Nothing was paid.` : `${item.item} · ${who}`}
                 </span>
               </span>
               <span className="activity-side">
-                <span className="activity-amount">{money(item.amount, item.token)}</span>
-                <span className="quiet">
-                  {blocked ? `${item.agent.name}, ` : ""}
-                  {when(item.at)}
-                </span>
+                <span className="activity-amount">{added ? "+" : ""}{money(item.amount)}</span>
+                <span className="quiet">{blocked && item.shopper ? `${item.shopper.name}, ` : ""}{when(item.at)}</span>
               </span>
-              <span className="activity-chevron">
-                <ChevronIcon size={16} />
-              </span>
+              <span className="activity-chevron"><ChevronIcon size={16} /></span>
             </button>
           </li>
         );

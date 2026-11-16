@@ -590,6 +590,13 @@ export class MandateService {
       } else {
         const outcome = await this.buyAs(this.core.read().mandates.find((m) => m.id === mandate.id)!, await this.offer(record.offerId), "Bought after you raised the limit");
         settle(outcome.status === "paid" ? { status: "raised", txHash: outcome.txHash } : { status: "failed", error: outcome.status === "blocked" ? outcome.reason : "Nothing to buy" });
+        if (outcome.status === "paid") {
+          // The job's last line said it was blocked; now it isn't.
+          this.core.update((s) => {
+            const job = s.mandates.find((m) => m.id === mandate.id)!.job;
+            if (job) Object.assign(job, { lastRunAt: now(), lastResult: `Bought ${outcome.offer.title.toLowerCase()} from ${outcome.offer.store.name} for ${money(outcome.offer.price)} after you raised the limit` });
+          });
+        }
       }
     }
     const updated = this.core.read();
@@ -764,7 +771,7 @@ export class MandateService {
     const limit = units(mandate.limit);
     return {
       name: mandate.name, ownerName: owner?.name ?? "", status: this.status(mandate),
-      limit: mandate.limit, spent: dollars(spent), remaining: dollars(limit > spent ? limit - spent : 0n),
+      limit: mandate.limit, spent: dollars(spent), remaining: dollars(this.status(mandate) === "active" && limit > spent ? limit - spent : 0n),
       period: mandate.period, expiresAt: mandate.expiresAt, currency: "USD",
       trustedStores: (await this.stores()).filter((store) => store.trusted),
     };

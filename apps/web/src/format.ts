@@ -1,59 +1,48 @@
-// How money, time and limits are worded for the account owner.
-import { formatAmount, type Mandate, type MandatePeriod, type TokenInfo } from "@mandate/shared";
+// How money, time and rules are worded for the account owner. Amounts arrive
+// as decimal dollar strings ("2.4").
+import type { Period, Shopper } from "@mandate/shared/api";
 
-/** True when amounts in this token read as plain dollars. */
-export const isDollars = (token: TokenInfo) => token.symbol === "USDC";
-
-/**
- * An amount in two parts, so the big figures can set the cents smaller.
- * Dollars: "$482" + ".60". Anything else: "482.6" + " XLM".
- */
-export function moneyParts(baseUnits: string, token: TokenInfo): { lead: string; tail: string } {
-  const [whole = "0", fraction = ""] = formatAmount(baseUnits).split(".");
-  const grouped = Number(whole).toLocaleString("en-US");
-  if (isDollars(token)) {
-    return { lead: `$${grouped}`, tail: `.${fraction.padEnd(2, "0")}` };
-  }
-  return { lead: `${grouped}${fraction ? `.${fraction}` : ""}`, tail: ` ${token.symbol}` };
+/** "$482" + ".60", so big figures can set the cents smaller. */
+export function moneyParts(value: string): { lead: string; tail: string } {
+  const [whole = "0", fraction = ""] = Number(value || 0).toFixed(2).split(".");
+  return { lead: `$${Number(whole).toLocaleString("en-US")}`, tail: `.${fraction}` };
 }
 
-/** Dollar-pegged tokens read as dollars; anything else shows its symbol. */
-export function money(baseUnits: string, token: TokenInfo): string {
-  const { lead, tail } = moneyParts(baseUnits, token);
+export function money(value: string): string {
+  const { lead, tail } = moneyParts(value);
   return lead + tail;
 }
 
 /** Like `money`, but drops ".00" so round limits read as "$50". */
-export function roundMoney(baseUnits: string, token: TokenInfo): string {
-  const { lead, tail } = moneyParts(baseUnits, token);
+export function roundMoney(value: string): string {
+  const { lead, tail } = moneyParts(value);
   return tail === ".00" ? lead : lead + tail;
 }
 
-const PERIOD_WORDS: Record<MandatePeriod, { a: string; current: string }> = {
-  day: { a: "a day", current: "today" },
-  week: { a: "a week", current: "this week" },
-  month: { a: "a month", current: "this month" },
+const PERIOD_WORDS: Record<Period, { a: string; current: string; every: string; ly: string }> = {
+  day: { a: "a day", current: "today", every: "every day", ly: "daily" },
+  week: { a: "a week", current: "this week", every: "every week", ly: "weekly" },
+  month: { a: "a month", current: "this month", every: "every month", ly: "monthly" },
 };
 
-export const periodWords = (period: MandatePeriod | null) => PERIOD_WORDS[period ?? "day"];
+export const periodWords = (period: Period) => PERIOD_WORDS[period];
 
 /** "Up to $50 a week, at trusted stores only" */
-export function ruleSummary(shopper: Mandate): string {
-  if (shopper.status === "revoked" || shopper.limit === null) return "Stopped";
-  return `Up to ${roundMoney(shopper.limit, shopper.token)} ${periodWords(shopper.period).a}, at trusted stores only`;
+export function ruleSummary(shopper: Shopper): string {
+  if (shopper.status === "stopped") return "Stopped";
+  return `Up to ${roundMoney(shopper.limit)} ${periodWords(shopper.period).a}, at trusted stores only`;
 }
 
-/** What the shopper can still spend in the current period, base units. */
-export function leftAmount(shopper: Mandate): string {
-  if (!shopper.limit) return "0";
-  const left = BigInt(shopper.limit) - BigInt(shopper.spent);
-  return (left > 0n ? left : 0n).toString();
+export function leftAmount(shopper: Shopper): string {
+  const left = Number(shopper.limit) - Number(shopper.spent);
+  return String(left > 0 ? left : 0);
 }
 
 /** Share of the limit still unspent, 0 to 1. */
-export function leftShare(shopper: Mandate): number {
-  if (!shopper.limit || shopper.limit === "0") return 0;
-  return Math.max(0, Math.min(1, Number(leftAmount(shopper)) / Number(shopper.limit)));
+export function leftShare(shopper: Shopper): number {
+  const limit = Number(shopper.limit);
+  if (!limit) return 0;
+  return Math.max(0, Math.min(1, Number(leftAmount(shopper)) / limit));
 }
 
 export function when(iso: string): string {
@@ -63,6 +52,16 @@ export function when(iso: string): string {
   return `${date.toLocaleDateString("en-US", { month: "short", day: "numeric" })}, ${time}`;
 }
 
+/** "in 3 days", "in 5 hours", "now" */
+export function fromNow(iso: string): string {
+  const ms = Date.parse(iso) - Date.now();
+  if (ms <= 60_000) return "now";
+  const hours = ms / 3_600_000;
+  if (hours < 1) return `in ${Math.round(ms / 60_000)} min`;
+  if (hours < 36) return `in ${Math.round(hours)} hours`;
+  return `in ${Math.round(hours / 24)} days`;
+}
+
 /** "Saturday, November 14 at 2:14 pm" */
 export function fullDate(iso: string): string {
   const date = new Date(iso);
@@ -70,3 +69,10 @@ export function fullDate(iso: string): string {
   const time = date.toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" }).toLowerCase();
   return `${day} at ${time}`;
 }
+
+export const shortDate = (iso: string) => new Date(iso).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+
+/** "GABC…WXYZ" */
+export const short = (value: string) => `${value.slice(0, 4)}…${value.slice(-4)}`;
+
+export const newRequestId = () => crypto.randomUUID();

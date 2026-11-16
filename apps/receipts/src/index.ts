@@ -10,12 +10,12 @@ import { ReceiptStore } from "./store.ts";
 const env = process.env;
 const port = Number(env.RECEIPTS_PORT ?? 4022);
 const host = env.RECEIPTS_HOST ?? "0.0.0.0";
-const dbPath = env.PAYMENTS_CHAIN_DB ?? fileURLToPath(new URL("../workspace.sqlite", import.meta.url));
+const dbPath = env.PAYMENTS_CHAIN_DB || fileURLToPath(new URL("../workspace.sqlite", import.meta.url));
 const config = stellarConfig(env);
 
 const gateway = new StellarGateway(dbPath, config);
 await gateway.check();
-const receipts = new ReceiptStore(env.RECEIPTS_DB ?? fileURLToPath(new URL("../receipts.sqlite", import.meta.url)));
+const receipts = new ReceiptStore(env.RECEIPTS_DB || fileURLToPath(new URL("../receipts.sqlite", import.meta.url)));
 const service = new MandateService(dbPath, gateway, {
   merchantUrl: env.MERCHANT_URL ?? "http://localhost:4021",
   verifier: config.verifier!,

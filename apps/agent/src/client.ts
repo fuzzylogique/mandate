@@ -30,7 +30,7 @@ export type BuyResult =
   | { status: "paid"; offer: Offer; txHash: string; explorerUrl: string }
   | { status: "blocked"; offer: Offer; reason: string; requestId?: string };
 
-export const defaultKeyFile = () => process.env.MANDATE_AGENT_FILE ?? join(homedir(), ".mandate", "agent.json");
+export const defaultKeyFile = () => process.env.MANDATE_AGENT_FILE || join(homedir(), ".mandate", "agent.json");
 
 export class MandateAgent {
   private file: string;
@@ -39,7 +39,7 @@ export class MandateAgent {
 
   constructor(options: { file?: string; apiUrl?: string } = {}) {
     this.file = options.file ?? defaultKeyFile();
-    const apiUrl = options.apiUrl ?? process.env.MANDATE_API_URL ?? "http://localhost:4022";
+    const apiUrl = options.apiUrl ?? (process.env.MANDATE_API_URL || "http://localhost:4022");
     if (existsSync(this.file)) {
       this.data = JSON.parse(readFileSync(this.file, "utf8")) as KeyFile;
       if (options.apiUrl) this.data.apiUrl = options.apiUrl;

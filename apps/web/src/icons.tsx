@@ -78,6 +78,26 @@ export const MoonIcon = ({ size }: Props) => (
   </Icon>
 );
 
+/** A small four-point spark: an assistant. */
+export const SparkIcon = ({ size }: Props) => (
+  <Icon size={size}>
+    <path d="M12 3l1.800 5.400L19 10l-5.200 1.600L12 17l-1.800-5.400L5 10l5.200-1.600zM19 16l.700 1.800L21.500 18.500l-1.800.700L19 21l-.700-1.800L16.500 18.500l1.800-.700z" />
+  </Icon>
+);
+
+export const PersonIcon = ({ size }: Props) => (
+  <Icon size={size}>
+    <circle cx="12" cy="8" r="4" />
+    <path d="M4 21c1.200-4 4.300-6 8-6s6.800 2 8 6" />
+  </Icon>
+);
+
+export const BellIcon = ({ size }: Props) => (
+  <Icon size={size}>
+    <path d="M6 16V11a6 6 0 0112 0v5l2 2H4zM10 21h4" />
+  </Icon>
+);
+
 /** The Mandate mark: a plain ring. */
 export const Logo = () => (
   <svg width="18" height="18" viewBox="0 0 18 18" aria-hidden="true">

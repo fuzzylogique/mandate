@@ -21,7 +21,7 @@ export function createApp(service: MandateService) {
   // Keep the raw body: assistants sign it.
   app.use(express.json({ limit: "16kb", verify: (req, _res, buf) => { (req as Request & { rawBody?: string }).rawBody = buf.toString("utf8"); } }));
 
-  const allowedOrigins = new Set((process.env.WEB_ORIGIN ?? "http://localhost:4020,http://127.0.0.1:4020").split(",").map((o) => o.trim()));
+  const allowedOrigins = new Set((process.env.WEB_ORIGIN || "http://localhost:4020,http://127.0.0.1:4020").split(",").map((o) => o.trim()));
   app.use((req, res, next) => {
     res.setHeader("Cache-Control", "no-store");
     const origin = req.get("origin");
