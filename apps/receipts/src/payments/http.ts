@@ -54,6 +54,7 @@ export function createPaymentApp(service: StellarPaymentService) {
     res.clearCookie("mandate_session", { ...cookieOptions, maxAge: undefined }).status(204).end();
   });
   app.get("/api/workspace", async (req, res) => res.json(await service.workspace(actor(req))));
+  app.post("/api/agents", async (req, res) => res.status(201).json(await service.createAgent(actor(req), body(req))));
   app.post("/api/accounts/open", async (req, res) => {
     res.status(201).json(await service.openAccount(actor(req), body(req)));
   });

@@ -3,8 +3,8 @@ import { spawnSync } from "node:child_process";
 import { test } from "node:test";
 
 const sellerId = `C${"A".repeat(55)}`;
-const details = { mandateId: "mnd_cli_test", sellerId, amount: "0.2", reference: "LangChain payment" };
-const prompt = `Pay 0.2 USD to seller ${sellerId} using mandate mnd_cli_test`;
+const details = { agentId: "agt_test_buyer", mandateId: "mnd_cli_test", sellerId, amount: "0.2", reference: "LangChain payment" };
+const prompt = `Pay 0.2 USD to seller ${sellerId} using mandate mnd_cli_test and agent identification agt_test_buyer`;
 const toolCall = {
   role: "model", parts: [{ functionCall: { name: "pay_with_mandate", args: details } }],
 };
@@ -22,7 +22,7 @@ function runCli(args: string[], input: string, responses: unknown[], expectedPay
         payments++;
         const body = JSON.parse(options.body);
         assert.deepEqual(body, {
-          mandateId: 'mnd_cli_test', sellerAddress: ${JSON.stringify(sellerId)}, sellerName: 'Seller',
+          mandateId: 'mnd_cli_test', agentId: 'agt_test_buyer', sellerAddress: ${JSON.stringify(sellerId)}, sellerName: 'Seller',
           amount: '0.2', reference: 'LangChain payment', requestId: 'cli-agent-001'
         });
         return Response.json({status: 'pending', reason: 'Awaiting confirmation', txHash: 'test-tx'}, {status: 202});

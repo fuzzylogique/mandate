@@ -9,6 +9,7 @@ interface Props { action: AccountAction; onDone: () => Promise<void>; onClose: (
 function Field({ label, children }: { label: string; children: ReactNode }) { return <label className="field">{label}{children}</label>; }
 
 export function AccountForms({ action, onDone, onClose }: Props) {
+  const [agentId, setAgentId] = useState("");
   const [amount, setAmount] = useState("");
   const [fundingMethod, setFundingMethod] = useState<FundingMethod>("fiat");
   const [recipient, setRecipient] = useState("");
@@ -24,7 +25,7 @@ export function AccountForms({ action, onDone, onClose }: Props) {
     event.preventDefault(); setBusy(true); setError("");
     try {
       if (action.kind === "fund") await api.fund(account.id, amount, requestId, fundingMethod);
-      else await api.pay({ accountId: account.id, mandateReference: grant?.reference, amount, destination: recipient, reference, requestId });
+      else await api.pay({ accountId: account.id, mandateReference: grant?.reference, ...(grant ? { agentId } : {}), amount, destination: recipient, reference, requestId });
       await onDone(); onClose();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Request failed"); }
     finally { setBusy(false); }
@@ -39,6 +40,7 @@ export function AccountForms({ action, onDone, onClose }: Props) {
         </div></fieldset>
         <p className="form-note">{fundingMethod === "fiat" ? "Enter an amount to add demo USD. These demo funds settle on Stellar testnet." : "Enter an amount to use the automatic Stellar testnet funding flow. Testnet USD is issued and transferred into your account."} Your balance updates after confirmation.</p>
       </> : <>
+        {grant && <Field label="Agent identification"><input required maxLength={128} value={agentId} disabled={busy} onChange={event => change(() => setAgentId(event.target.value))} placeholder="agt_…" /></Field>}
         {grant && <p className="form-note">{grant.name}: {formatValue(grant.spent, grant.currency ?? account.currency)} of {money(grant.limit, grant.currency ?? account.currency)} used. Only verified recipients are allowed.</p>}
         <Field label="Recipient Smart Account address"><input required maxLength={56} value={recipient} disabled={busy} onChange={event => change(() => setRecipient(event.target.value))} placeholder="C…" /></Field>
         <Field label="Payment reference"><input required maxLength={200} value={reference} disabled={busy} onChange={event => change(() => setReference(event.target.value))} /></Field>

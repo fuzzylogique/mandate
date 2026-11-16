@@ -1,7 +1,7 @@
 //! Mandate smart account.
 //!
-//! Holds the owner's payment assets. The owner controls the default rule; each agent
-//! gets its own context rule scoped to one token contract, with a spending
+//! Holds the owner's payment assets. The owner controls the default rule; each mandate
+//! gets a context rule scoped to one token contract, with a spending
 //! limit policy and the verified-seller policy attached.
 //!
 //! Adapted from OpenZeppelin's `multisig-smart-account` example (MIT):

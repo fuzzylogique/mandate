@@ -1,4 +1,4 @@
-/** Login identities own financial accounts; they never hold funds themselves. */
+/** Each user has one main account backed by a private Classic/Smart wallet pair. */
 export type PaymentRail = "traditional" | "blockchain";
 export type AccountType = "traditional" | "stellar";
 export type FundingMethod = "fiat" | "testnet";
@@ -9,6 +9,17 @@ export interface Customer {
   id: string;
   name: string;
   email: string;
+}
+
+export interface AccountAgent {
+  /** Public identification value. Registration is verified on chain. */
+  id: string;
+  accountId: string;
+  name: string;
+  createdAt: string;
+  verified: boolean;
+  verificationTxHash: string;
+  explorerUrl?: string;
 }
 
 export interface SpendingAccount {
@@ -63,6 +74,7 @@ export interface PaymentEntry {
   amount: string;
   currency: PaymentCurrency;
   mandateReference: string | null;
+  agentId?: string;
   reference: string;
   createdAt: string;
   settlement: "traditional-demo" | "stellar-testnet";
@@ -74,7 +86,9 @@ export interface PaymentWorkspace {
   mode: "stellar-testnet";
   network?: PaymentNetwork;
   customer: Customer;
+  /** Main account first. Additional records are retained only for legacy workspaces. */
   accounts: SpendingAccount[];
+  agents: AccountAgent[];
   mandates: AccountMandate[];
   shared: { account: SpendingAccount; mandate: AccountMandate; ownerName: string }[];
   activity: PaymentEntry[];
@@ -82,7 +96,7 @@ export interface PaymentWorkspace {
 
 export interface OpenAccountInput {
   name: string;
-  /** Optional legacy account classification. New accounts need only a name. */
+  /** Legacy compatibility only. Opening returns the existing main account. */
   type?: "traditional" | "stellar";
   requestId: string;
 
@@ -99,8 +113,10 @@ export interface MandateCreation {
 }
 
 export interface MandatePaymentInput {
-  /** The secret ID is the only third-party payment authorization. */
+  /** Secret spending authorization, used together with on-chain agent identification. */
   mandateId: string;
+  /** Must be registered on chain for the mandate's source account. */
+  agentId: string;
   sellerAddress: string;
   sellerName: string;
   amount: string;
@@ -109,6 +125,7 @@ export interface MandatePaymentInput {
 }
 
 export interface MandatePaymentPreview {
+  agent: { id: string; name: string; verified: boolean };
   mandate: { name: string; address: string; limit: string; spent: string; expiresAt: string };
   seller: { address: string; name: string; verified: boolean };
   currency: string;
@@ -121,7 +138,8 @@ export type MandatePaymentResult = { status: "paid"; payment: PaymentEntry }
   | { status: "pending"; reason: string; txHash: string };
 
 export interface CreateAccountMandateInput {
-  accountId: string;
+  /** Defaults to the authenticated user's main account. */
+  accountId?: string;
   name: string;
   recipientType: "person" | "agent";
   recipient: string;
@@ -143,6 +161,7 @@ export interface PaymentNetwork {
   smartAccounts: boolean;
   verifiedSmartAccounts?: boolean;
   mandates?: boolean;
+  agentVerification?: boolean;
   faucet: boolean;
   assets?: { currency: string; tokenContract: string; code?: string; issuer?: string }[];
 }

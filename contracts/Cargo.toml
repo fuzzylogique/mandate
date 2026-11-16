@@ -5,6 +5,8 @@ members = [
     "ed25519-verifier",
     "spending-limit-policy",
     "seller-registry",
+    "agent-registry",
+    "agent-verifier",
     "verified-smart-policy",
 ]
 

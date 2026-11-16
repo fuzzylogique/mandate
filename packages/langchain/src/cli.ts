@@ -11,6 +11,7 @@ function required(name: string, flag?: string, argument?: string): string {
 try {
   const { values } = parseArgs({
     options: {
+      "agent-id": { type: "string" },
       "mandate-id": { type: "string" },
       "seller-id": { type: "string" },
       amount: { type: "string" },
@@ -20,13 +21,14 @@ try {
     },
   });
   if (values.help) {
-    console.log("Usage: pnpm pay:langchain --mandate-id <id> --seller-id <C-address> --amount <USD>");
-    console.log("Flags override MANDATE_ID, SELLER_ID and PAYMENT_AMOUNT in .env.");
+    console.log("Usage: pnpm pay:langchain --mandate-id <id> --agent-id <identification> --seller-id <C-address> --amount <USD>");
+    console.log("Flags override MANDATE_ID, AGENT_ID, SELLER_ID and PAYMENT_AMOUNT in .env.");
     console.log('Optional: --reference <text> (default: "LangChain payment"), --request-id <id> (default: generated UUID).');
     console.log("These override PAYMENT_REFERENCE and PAYMENT_REQUEST_ID in .env.");
     console.log("The request ID is printed before submission. Reuse it with --request-id and the same payment details for retries.");
   } else {
     const pay = createPayTool({
+      agentId: required("AGENT_ID", "agent-id", values["agent-id"]),
       mandateId: required("MANDATE_ID", "mandate-id", values["mandate-id"]),
       sellerId: required("SELLER_ID", "seller-id", values["seller-id"]),
       apiUrl: process.env.PAYMENTS_API_URL,

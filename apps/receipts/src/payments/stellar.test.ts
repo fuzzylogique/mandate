@@ -13,8 +13,14 @@ import { createPaymentApp } from "./http.ts";
 
 /** Fake network for service tests. It owns balances; the service cannot create money. */
 class TestChain implements ChainGateway {
-  network: PaymentNetwork = { id: "stellar:testnet", name: "Test chain", rpcUrl: "https://rpc.example", horizonUrl: "https://horizon.example", explorerUrl: "https://explorer.example", currency: "XLM", tokenContract: StrKey.encodeContract(randomBytes(32)), smartAccounts: true, verifiedSmartAccounts: true, mandates: true, faucet: true };
+  network: PaymentNetwork = { id: "stellar:testnet", name: "Test chain", rpcUrl: "https://rpc.example", horizonUrl: "https://horizon.example", explorerUrl: "https://explorer.example", currency: "XLM", tokenContract: StrKey.encodeContract(randomBytes(32)), smartAccounts: true, verifiedSmartAccounts: true, mandates: true, agentVerification: true, faucet: true };
   verified = new Set<string>();
+  agents = new Map<string, string>();
+  async registerAgent(_id: string, account: ChainWallet, agentId: string, name: string) {
+    if (this.fail) throw new Error("Registry unavailable");
+    this.agents.set(`${account.address}:${agentId}`, name); return this.receipt();
+  }
+  async isVerifiedAgent(account: string, agentId: string) { return this.agents.has(`${account}:${agentId}`); }
   wallets = new Map<string, ChainWallet>();
   balances = new Map<string, bigint>();
   usdBalances = new Map<string, bigint>();
@@ -65,7 +71,7 @@ class TestChain implements ChainGateway {
     this.owners.set(id, treasury.id);
     this.wallets.set(id, wallet); return { ...wallet, ...this.receipt() };
   }
-  async transfer(_id: string, _treasury: ChainWallet, source: ChainWallet, destination: string, units: bigint, mandate?: { id: string; ruleId: number }, currency = "XLM") {
+  async transfer(_id: string, _treasury: ChainWallet, source: ChainWallet, destination: string, units: bigint, mandate?: { id: string; ruleId: number; agentId?: string }, currency = "XLM") {
     if (this.transactions.has(_id)) return this.transactions.get(_id)!;
     if (this.fail || (this.failFunding && source.rail === "classic")) throw new Error("Network unavailable");
     if (source.rail === "blockchain") assert.equal(_treasury.id, this.owners.get(source.id), "The linked Classic wallet must sign");
@@ -73,6 +79,7 @@ class TestChain implements ChainGateway {
     assert.ok(await this.balance(source, currency) >= units, "Network rejected insufficient funds");
     if (source.rail === "blockchain") assert.ok(await this.isVerifiedSmartAccount(destination), "Contract rejected recipient");
     if (mandate) {
+      assert.ok(mandate.agentId && await this.isVerifiedAgent(source.address, mandate.agentId), "Contract rejected unregistered agent");
       assert.ok(await this.isVerifiedSmartAccount(destination), "Contract rejected unverified smart recipient");
       const rule = this.rules.get(mandate.ruleId)!;
       assert.equal(rule.accountId, source.id); assert.equal(rule.currency, currency);
@@ -96,11 +103,17 @@ async function fixture(path = ":memory:") {
   const chain = new TestChain(); const service = new StellarPaymentService(path, chain);
   const registered = await service.register({ name: "Chain owner", email: "owner@example.com", password: "long chain password" });
   const owner = service.authenticate(registered.token);
-  return { chain, service, owner, token: registered.token };
+  const agent = await service.createAgent(owner, { name: "Buyer", requestId: "buyer" });
+  return { chain, service, owner, agentId: agent.id, token: registered.token };
+}
+
+async function sellerAccount(service: StellarPaymentService) {
+  const result = await service.register({ name: "Seller", email: `seller-${randomBytes(8).toString("hex")}@example.com`, password: "a secure seller password" });
+  return (await service.workspace(service.authenticate(result.token))).accounts[0]!;
 }
 
 test("chain workspace reads external balances and configurable network metadata", async () => {
-  const { chain, service, owner } = await fixture();
+  const { chain, service, owner, agentId } = await fixture();
   try {
     const account = await service.createAccount(owner, { name: "Stellar", type: "stellar", requestId: "account" });
     chain.usdBalances.set(account.address!, 123_456_789n);
@@ -115,24 +128,39 @@ test("chain workspace reads external balances and configurable network metadata"
   } finally { service.close(); }
 });
 
-test("failed chain deployment publishes no account and successful creation returns its transaction", async () => {
-  const { chain, service, owner } = await fixture();
+test("failed signup provisioning resumes the same wallet pair on login after restart", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mandate-signup-recovery-"));
+  const path = join(directory, "workspace.sqlite");
+  const chain = new TestChain();
+  let service = new StellarPaymentService(path, chain);
+  const store = new WorkspaceStore(path);
   try {
     chain.fail = true;
-    const input = { name: "Research", type: "stellar", requestId: "research" };
-    await assert.rejects(service.createAccount(owner, input));
-    assert.equal((await service.workspace(owner)).accounts.length, 0);
+    await assert.rejects(service.register({ name: "Owner", email: "recovery@example.com", password: "a secure owner password" }), { status: 503, message: /Sign in to resume/ });
+    assert.equal(store.read().accounts.length, 0);
+    assert.equal(store.read().sessions.length, 0);
+    const reserved = store.read().customers[0]!.mainAccountId;
+    assert.ok(reserved);
+    await assert.rejects(service.login({ email: "recovery@example.com", password: "a secure owner password" }));
+    assert.equal(store.read().sessions.length, 0);
+    service.close(); service = new StellarPaymentService(path, chain);
     chain.fail = false;
-    const created = await service.createAccount(owner, input);
-    assert.ok(created.address?.startsWith("C")); assert.ok(created.creationTxHash);
-    assert.equal(created.currency, "USD");
-    assert.equal((await service.createAccount(owner, input)).id, created.id);
-    assert.equal((await service.workspace(owner)).accounts.length, 1);
-  } finally { service.close(); }
+    const signedIn = await service.login({ email: "recovery@example.com", password: "a secure owner password" });
+    const actor = service.authenticate(signedIn.token);
+    const view = await service.workspace(actor);
+    assert.equal(view.accounts.length, 1);
+    assert.equal(view.accounts[0]!.id, reserved);
+    assert.ok(view.accounts[0]!.creationTxHash);
+    assert.ok(view.accounts[0]!.verified);
+    assert.equal(chain.wallets.size, 2);
+    await Promise.all([service.workspace(actor), service.workspace(actor)]);
+    assert.equal(chain.wallets.size, 2);
+    assert.equal(store.read().stellarPairs.length, 1);
+  } finally { store.close(); service.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
 test("funding and payments use network addresses and only journal confirmed receipts", async () => {
-  const { chain, service, owner } = await fixture();
+  const { chain, service, owner, agentId } = await fixture();
   try {
     const account = await service.createAccount(owner, { name: "Smart", type: "stellar", requestId: "smart" });
     const input = { amount: "10", requestId: "fund" };
@@ -150,32 +178,32 @@ test("funding and payments use network addresses and only journal confirmed rece
 });
 
 test("smart mandates install contract rules, sign with their rule, and revoke on chain", async () => {
-  const { chain, service, owner } = await fixture();
+  const { chain, service, owner, agentId } = await fixture();
   try {
     const account = await service.createAccount(owner, { name: "Smart", type: "stellar", requestId: "smart" });
     await service.fund(owner, account.id, { amount: "10", requestId: "fund" });
     const result = await service.createMandate(owner, { accountId: account.id, name: "Agent", recipientType: "agent", recipient: "agent", limit: "2", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "mandate" });
     assert.equal(result.mandate.enforcement, "on-chain");
-    const seller = await service.createAccount(owner, { name: "Seller", type: "stellar", requestId: "seller" });
-    const paid = await service.payWithMandate({ mandateId: result.mandateId, amount: "1", sellerAddress: seller.address, reference: "Test", requestId: "payment" });
+    const seller = await sellerAccount(service);
+    const paid = await service.payWithMandate({ agentId, mandateId: result.mandateId, amount: "1", sellerAddress: seller.address, reference: "Test", requestId: "payment" });
     assert.equal(paid.mandateReference, result.mandate.reference);
     assert.equal(chain.transfers.at(-1)!.ruleId, result.mandate.ruleId);
     const view = await service.workspace(owner); assert.equal(view.mandates[0]!.spent, "1");
     assert.equal(JSON.stringify(view).includes(result.mandateId), false);
     await service.revoke(owner, result.mandate.reference);
     assert.equal(chain.rules.get(result.mandate.ruleId!)!.revoked, true);
-    await assert.rejects(service.previewMandatePayment({ mandateId: result.mandateId }), { status: 401 });
+    await assert.rejects(service.previewMandatePayment({ agentId, mandateId: result.mandateId }), { status: 401 });
   } finally { service.close(); }
 });
 
 test("failed on-chain revocation disables service access and stays visibly retryable", async () => {
-  const { chain, service, owner } = await fixture();
+  const { chain, service, owner, agentId } = await fixture();
   try {
     const account = await service.createAccount(owner, { name: "Smart", type: "stellar", requestId: "smart" });
     const grant = await service.createMandate(owner, { accountId: account.id, name: "Agent", recipientType: "agent", recipient: "agent", limit: "1", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "mandate" });
     chain.fail = true;
     await assert.rejects(service.revoke(owner, grant.mandate.reference));
-    await assert.rejects(service.previewMandatePayment({ mandateId: grant.mandateId }), { status: 401 });
+    await assert.rejects(service.previewMandatePayment({ agentId, mandateId: grant.mandateId }), { status: 401 });
     assert.equal((await service.workspace(owner)).mandates[0]!.chainRevocationPending, true);
     assert.equal(chain.rules.get(grant.mandate.ruleId!)!.revoked, false);
     chain.fail = false;
@@ -186,14 +214,15 @@ test("failed on-chain revocation disables service access and stays visibly retry
 });
 
 test("a chain account and its mandates remain isolated from other customers", async () => {
-  const { chain, service, owner } = await fixture();
+  const { chain, service, owner, agentId } = await fixture();
   try {
     const account = await service.createAccount(owner, { name: "Private", type: "stellar", requestId: "private" });
     const other = await service.register({ name: "Other", email: "other@example.com", password: "other chain password" });
     const actor = service.authenticate(other.token);
     await assert.rejects(service.fund(actor, account.id, { amount: "1", requestId: "fund" }), { status: 404 });
     await assert.rejects(service.pay(actor, { accountId: account.id, amount: "1", destination: Keypair.random().publicKey(), reference: "Unauthorized", requestId: "pay" }), { status: 403 });
-    assert.deepEqual((await service.workspace(actor)).accounts, []);
+    assert.equal((await service.workspace(actor)).accounts.length, 1);
+    assert.notEqual((await service.workspace(actor)).accounts[0]!.id, account.id);
     assert.deepEqual((await service.workspace(actor)).activity, []);
   } finally { service.close(); }
 });
@@ -241,7 +270,7 @@ async function openWithMandate(service: StellarPaymentService, owner: ReturnType
 }
 
 test("legacy opening types are validated and internal wallets cannot be selected", async () => {
-  const { chain, service, owner } = await fixture();
+  const { chain, service, owner, agentId } = await fixture();
   try {
     for (const type of ["classic", "smart", "mandate"]) await assert.rejects(service.openAccount(owner, { name: "Invalid", type, requestId: type }), { status: 400 });
     const smart = (await service.openAccount(owner, { name: "Stellar", type: "stellar", requestId: "stellar" })).account;
@@ -254,11 +283,11 @@ test("legacy opening types are validated and internal wallets cannot be selected
 });
 
 test("third-party mandate previews and payments enforce recipient, balance, identity and limit checks", async () => {
-  const { chain, service, owner } = await fixture();
+  const { chain, service, owner, agentId } = await fixture();
   try {
     const opened = await openWithMandate(service, owner, mandateOpening());
-    const seller = await service.openAccount(owner, { name: "Seller", type: "stellar", requestId: "seller" });
-    const input = { mandateId: opened.mandateId, sellerAddress: seller.account.address, sellerName: "Seller", amount: "1", reference: "Test purchase", requestId: "purchase" };
+    const seller = { account: await sellerAccount(service) };
+    const input = { agentId, mandateId: opened.mandateId, sellerAddress: seller.account.address, sellerName: "Seller", amount: "1", reference: "Test purchase", requestId: "purchase" };
     const preview = await service.previewMandatePayment(input);
     assert.equal(preview.checks.find(c => c.label.includes("sufficient"))!.passed, false);
     await assert.rejects(service.payWithMandate(input), { status: 409 });
@@ -281,13 +310,13 @@ test("third-party mandate previews and payments enforce recipient, balance, iden
 
 for (const type of ["traditional", "stellar"] as const) {
   test(`${type} payments reject the source as recipient without spending funds or mandate allowance`, async () => {
-    const { chain, service, owner } = await fixture();
+    const { chain, service, owner, agentId } = await fixture();
     try {
       const source = await service.createAccount(owner, { name: "Source", type, requestId: "source" });
-      const seller = await service.createAccount(owner, { name: "Seller", type, requestId: "seller" });
+      const seller = await sellerAccount(service);
       await service.fund(owner, source.id, { amount: "10", requestId: "fund" });
       const created = await service.createMandate(owner, { accountId: source.id, name: "Purchasing", recipientType: "agent", recipient: "Buyer", limit: "2", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "mandate" });
-      const input = { mandateId: created.mandateId, sellerAddress: source.address, sellerName: "Source", amount: "0.5", reference: "Purchase", requestId: "self" };
+      const input = { agentId, mandateId: created.mandateId, sellerAddress: source.address, sellerName: "Source", amount: "0.5", reference: "Purchase", requestId: "self" };
       const identifiers = [source.address];
       for (const identifier of identifiers) {
         const preview = await service.previewMandatePayment({ ...input, sellerAddress: identifier });
@@ -297,7 +326,7 @@ for (const type of ["traditional", "stellar"] as const) {
       }
       const before = await service.workspace(owner);
       assert.equal(before.accounts.find(a => a.id === source.id)!.balance, "10");
-      assert.equal(before.accounts.find(a => a.id === seller.id)!.balance, "0");
+      assert.equal(await chain.balance(chain.wallet(seller.id), "USD"), 0n);
       assert.equal(before.mandates[0]!.spent, "0");
       assert.equal(before.activity.filter(e => e.kind === "payment").length, 0);
       assert.equal(chain.transfers.filter(t => t.ruleId !== undefined).length, 0);
@@ -308,7 +337,7 @@ for (const type of ["traditional", "stellar"] as const) {
       assert.equal((await service.payWithMandate(payment)).id, receipt.id);
       const after = await service.workspace(owner);
       assert.equal(after.accounts.find(a => a.id === source.id)!.balance, "9.5");
-      assert.equal(after.accounts.find(a => a.id === seller.id)!.balance, "0.5");
+      assert.equal(await chain.balance(chain.wallet(seller.id), "USD"), 5_000_000n);
       assert.equal(after.mandates[0]!.spent, "0.5");
       assert.equal(after.activity.filter(e => e.kind === "payment").length, 1);
     } finally { service.close(); }
@@ -317,16 +346,16 @@ for (const type of ["traditional", "stellar"] as const) {
 
 test("expired third-party mandate IDs cannot authorize payments", async t => {
   t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-14T12:00:00Z") });
-  const { service, owner } = await fixture();
+  const { service, owner, agentId } = await fixture();
   try {
     const opened = await openWithMandate(service, owner, mandateOpening({ expiresAt: "2026-11-14T12:00:01Z" }));
     t.mock.timers.tick(1001);
-    await assert.rejects(service.previewMandatePayment({ mandateId: opened.mandateId }), { status: 401 });
+    await assert.rejects(service.previewMandatePayment({ agentId, mandateId: opened.mandateId }), { status: 401 });
   } finally { service.close(); }
 });
 
-test("/pay accepts a secret mandate ID without an owner cookie or separate credential and reports paid, declined or pending", async t => {
-  const { chain, service, owner, token } = await fixture();
+test("/pay accepts a secret mandate ID with registered agent identification and reports paid, declined or pending", async t => {
+  const { chain, service, owner, token, agentId } = await fixture();
   const server = createPaymentApp(service).listen(0, "127.0.0.1");
   await new Promise<void>(resolve => server.once("listening", resolve));
   t.after(async () => { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); service.close(); });
@@ -334,8 +363,8 @@ test("/pay accepts a secret mandate ID without an owner cookie or separate crede
   const base = `http://127.0.0.1:${address.port}/api`;
   const send = (path: string, input: unknown, headers = {}) => fetch(base + path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(input) });
   const opened = await openWithMandate(service, owner, mandateOpening());
-  const seller = await service.openAccount(owner, { name: "Seller", type: "stellar", requestId: "seller" });
-  const input = { mandateId: opened.mandateId, sellerAddress: seller.account.address, sellerName: "Seller", amount: "1", reference: "Public payment", requestId: "public-pay" };
+  const seller = { account: await sellerAccount(service) };
+  const input = { agentId, mandateId: opened.mandateId, sellerAddress: seller.account.address, sellerName: "Seller", amount: "1", reference: "Public payment", requestId: "public-pay" };
   const auth = {};
   const cookieOnly = await send("/pay", input, { cookie: `mandate_session=${token}` });
   assert.equal((await cookieOnly.json() as { status: string }).status, "declined");
@@ -361,28 +390,94 @@ test("/pay accepts a secret mandate ID without an owner cookie or separate crede
   assert.equal((await revoked.json() as { status: string }).status, "declined");
 });
 
-test("traditional accounts expose one verified Smart Account and keep their Classic wallet private", async () => {
-  const { chain, service, owner } = await fixture();
+test("signup provisions one verified main account with a private Classic wallet", async () => {
+  const { chain, service, owner, agentId } = await fixture();
   try {
-    const wallets = chain.wallets.size;
-    const opened = await service.openAccount(owner, { name: "Operating bank account", type: "traditional", requestId: "bank" });
-    assert.equal(opened.account.rail, "traditional"); assert.equal(opened.account.type, "traditional");
-    assert.equal(opened.account.verified, true); assert.equal(opened.account.verificationSource, "on-chain");
-    assert.equal(opened.account.currency, "USD"); assert.ok(StrKey.isValidContract(opened.account.address!));
-    assert.equal("bankDetails" in opened.account, false);
-    assert.ok(opened.account.creationTxHash); assert.equal("token" in opened, false);
-    assert.equal(chain.wallets.size, wallets + 2); assert.equal(chain.transfers.length, 0);
-    assert.equal((await service.openAccount(owner, { name: "Operating bank account", type: "traditional", requestId: "bank" })).account.id, opened.account.id);
+    assert.equal(chain.wallets.size, 2, "Signup provisions both wallets before returning");
     const view = await service.workspace(owner);
-    assert.equal(view.accounts.find(a => a.id === opened.account.id)!.verified, true); assert.equal(opened.account.balance, "0");
+    const account = view.accounts[0]!;
+    assert.equal(view.accounts.length, 1);
+    assert.equal(account.name, "Main account");
+    assert.ok(account.verified && account.creationTxHash && account.verificationTxHash);
+    assert.equal(account.currency, "USD");
+    assert.equal(account.balance, "0");
+    assert.ok(StrKey.isValidContract(account.address!));
+    assert.equal(chain.wallets.size, 2);
+    assert.equal(chain.transfers.length, 0);
+    assert.equal(JSON.stringify(view).includes(chain.wallet(chain.owners.get(account.id)!).address), false);
   } finally { service.close(); }
 });
 
+test("mandates default to the main account and share its balance without provisioning wallets", async () => {
+  const { chain, service, owner, agentId } = await fixture();
+  try {
+    const account = (await service.workspace(owner)).accounts[0]!;
+    await service.fund(owner, account.id, { amount: "20", requestId: "fund" });
+    const input = { name: "Purchasing", recipientType: "agent", recipient: "Buyer", limit: "5", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "first" };
+    const first = await service.createMandate(owner, input);
+    const second = await service.createMandate(owner, { ...input, requestId: "second" });
+    assert.equal(first.mandate.accountId, account.id);
+    assert.equal(second.mandate.accountId, account.id);
+    assert.notEqual(first.mandate.reference, second.mandate.reference);
+    assert.equal((await service.createMandate(owner, input)).mandateId, first.mandateId);
+    assert.equal((await service.workspace(owner)).accounts[0]!.balance, "20");
+    assert.equal(chain.wallets.size, 2);
+  } finally { service.close(); }
+});
+
+test("a preexisting login without accounts receives one main account on sign-in", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mandate-login-migration-"));
+  const path = join(directory, "workspace.sqlite");
+  const store = new WorkspaceStore(path);
+  const chain = new TestChain();
+  const service = new StellarPaymentService(path, chain);
+  try {
+    await store.register({ name: "Existing owner", email: "existing@example.com", password: "a secure existing password" });
+    const input = { email: "existing@example.com", password: "a secure existing password" };
+    const [first, second] = await Promise.all([service.login(input), service.login(input)]);
+    assert.equal(first.customer.id, second.customer.id);
+    assert.equal(store.read().accounts.length, 1);
+    assert.equal(store.read().stellarPairs.length, 1);
+    assert.equal(chain.wallets.size, 2);
+    assert.equal((await service.workspace(service.authenticate(first.token))).accounts.length, 1);
+  } finally { service.close(); store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("existing users adopt a stable main account while retaining historical accounts, funds and mandates", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mandate-main-migration-"));
+  const path = join(directory, "workspace.sqlite");
+  const result = await fixture(path);
+  const { chain, owner, agentId } = result;
+  let service = result.service;
+  const store = new WorkspaceStore(path);
+  try {
+    const first = (await service.workspace(owner)).accounts[0]!;
+    const historical = await sellerAccount(service);
+    // Represent an old workspace that had multiple accounts and no main identity.
+    store.update(state => {
+      delete state.customers.find(c => c.id === owner.id)!.mainAccountId;
+      state.accounts.find(a => a.id === historical.id)!.ownerId = owner.id;
+    });
+    await service.fund(owner, historical.id, { amount: "12", requestId: "legacy-funding" });
+    const grant = await service.createMandate(owner, { accountId: historical.id, name: "Legacy access", recipientType: "agent", recipient: "Buyer", limit: "2", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "legacy-grant" });
+    assert.equal(store.read().customers.find(c => c.id === owner.id)!.mainAccountId, first.id);
+    store.update(state => { state.accounts.reverse(); });
+    service.close(); service = new StellarPaymentService(path, chain);
+    const view = await service.workspace(owner);
+    assert.equal(view.accounts[0]!.id, first.id);
+    assert.equal(view.accounts.length, 2);
+    assert.equal(view.accounts.find(a => a.id === historical.id)!.balance, "12");
+    assert.equal(view.mandates[0]!.reference, grant.mandate.reference);
+    assert.equal(view.activity[0]!.accountId, historical.id);
+    assert.equal(chain.wallets.size, 4);
+  } finally { store.close(); service.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
 test("traditional payments transfer testnet USD, preserve funds, reject unverified recipients and process retries once", async () => {
-  const { chain, service, owner } = await fixture();
+  const { chain, service, owner, agentId } = await fixture();
   try {
     const source = (await service.openAccount(owner, { name: "Bank source", type: "traditional", requestId: "source" })).account;
-    const seller = (await service.openAccount(owner, { name: "Bank seller", type: "traditional", requestId: "seller" })).account;
+    const seller = await sellerAccount(service);
     await service.fund(owner, source.id, { amount: "100", requestId: "fund-bank" });
     await service.fund(owner, source.id, { amount: "100", requestId: "fund-bank" });
     const input = { accountId: source.id, destination: seller.address, amount: "12.50", reference: "Invoice", requestId: "bank-payment" };
@@ -395,7 +490,7 @@ test("traditional payments transfer testnet USD, preserve funds, reject unverifi
     await assert.rejects(service.pay(owner, { ...input, amount: "100", requestId: "over-balance" }), { status: 409 });
     const view = await service.workspace(owner);
     assert.equal(view.accounts.find(a => a.id === source.id)!.balance, "87.5");
-    assert.equal(view.accounts.find(a => a.id === seller.id)!.balance, "12.5");
+    assert.equal(await chain.balance(chain.wallet(seller.id), "USD"), 125_000_000n);
     assert.equal("parent" in view, false); assert.equal(chain.transfers.length, 2);
     await service.fund(owner, source.id, { amount: "1", requestId: "top-up" });
     await service.fund(owner, source.id, { amount: "1", requestId: "top-up" });
@@ -404,29 +499,29 @@ test("traditional payments transfer testnet USD, preserve funds, reject unverifi
 });
 
 test("traditional mandates install on-chain USD rules and can pay Stellar Smart Accounts", async () => {
-  const { chain, service, owner } = await fixture();
+  const { chain, service, owner, agentId } = await fixture();
   try {
     const source = (await service.openAccount(owner, { name: "Source", type: "traditional", requestId: "source" })).account;
-    const seller = (await service.openAccount(owner, { name: "Seller", type: "stellar", requestId: "seller" })).account;
+    const seller = await sellerAccount(service);
     await service.fund(owner, source.id, { amount: "50", requestId: "fund" });
     const created = await service.createMandate(owner, { accountId: source.id, name: "Team allowance", recipientType: "agent", recipient: "External person", limit: "10", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "bank-mandate" });
     assert.equal("rail" in created.mandate, false); assert.equal(created.mandate.enforcement, "on-chain"); assert.equal(created.mandate.currency, "USD");
     assert.ok(created.mandate.ruleId); assert.equal(created.mandate.accountId, source.id);
-    const input = { mandateId: created.mandateId, sellerAddress: seller.address, sellerName: "Seller", amount: "6", reference: "Travel", requestId: "purchase" };
+    const input = { agentId, mandateId: created.mandateId, sellerAddress: seller.address, sellerName: "Seller", amount: "6", reference: "Travel", requestId: "purchase" };
     assert.ok((await service.previewMandatePayment(input)).checks.every(c => c.passed));
     const paid = await service.payWithMandate(input);
     assert.equal(paid.settlement, "stellar-testnet"); assert.equal(paid.mandateReference, created.mandate.reference);
     await assert.rejects(service.payWithMandate({ ...input, amount: "5", requestId: "over-limit" }), { status: 403 });
     const view = await service.workspace(owner);
-    assert.equal(view.accounts.length, 2); assert.equal(view.mandates[0]!.spent, "6");
+    assert.equal(view.accounts.length, 1); assert.equal(view.mandates[0]!.spent, "6");
     assert.equal(chain.transfers.length, 2); assert.equal(chain.rules.size, 1);
     await service.revoke(owner, created.mandate.reference);
-    await assert.rejects(service.previewMandatePayment({ mandateId: created.mandateId }), { status: 401 });
+    await assert.rejects(service.previewMandatePayment({ agentId, mandateId: created.mandateId }), { status: 401 });
   } finally { service.close(); }
 });
 
 test("traditional account funding and credentials remain isolated across customers", async () => {
-  const { service, owner } = await fixture();
+  const { service, owner, agentId } = await fixture();
   try {
     const source = (await service.openAccount(owner, { name: "Private source", type: "traditional", requestId: "source" })).account;
     const other = await service.register({ name: "Other owner", email: "bank-other@example.com", password: "long banking password" });
@@ -443,22 +538,20 @@ test("traditional account funding and credentials remain isolated across custome
 });
 
 test("/pay settles a traditional mandate on chain without an owner session or payment method", async t => {
-  const { chain, service, owner, token } = await fixture();
+  const { chain, service, owner, token, agentId } = await fixture();
   const server = createPaymentApp(service).listen(0, "127.0.0.1");
   await new Promise<void>(resolve => server.once("listening", resolve));
   t.after(async () => { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); service.close(); });
   const port = (server.address() as { port: number }).port;
   const send = (path: string, body: unknown, headers = {}) => fetch(`http://127.0.0.1:${port}/api${path}`, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
   const ownerHeaders = { cookie: `mandate_session=${token}` };
-  const accountResponse = await send("/accounts/open", { name: "Bank source", type: "traditional", requestId: "source" }, ownerHeaders);
-  assert.equal(accountResponse.status, 201);
-  const { account: source } = await accountResponse.json() as { account: { id: string } };
-  const seller = (await service.openAccount(owner, { name: "Bank seller", type: "traditional", requestId: "seller" })).account;
+  const source = (await service.workspace(owner)).accounts[0]!;
+  const seller = await sellerAccount(service);
   await service.fund(owner, source.id, { amount: "100", requestId: "fund" });
   const mandateResponse = await send("/mandates", { accountId: source.id, name: "Buyer", recipientType: "agent", recipient: "Third party", limit: "10", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "mandate" }, ownerHeaders);
   assert.equal(mandateResponse.status, 201);
   const created = await mandateResponse.json() as { mandate: { reference: string }; mandateId: string };
-  const input = { mandateId: created.mandateId, sellerAddress: seller.address, sellerName: "Bank seller", amount: "5", reference: "Demo invoice", requestId: "public-bank" };
+  const input = { agentId, mandateId: created.mandateId, sellerAddress: seller.address, sellerName: "Bank seller", amount: "5", reference: "Demo invoice", requestId: "public-bank" };
   const headers = {};
   const preview = await send("/pay/preview", input, headers);
   assert.equal(preview.status, 200); assert.equal((await preview.json() as { currency: string }).currency, "USD");
@@ -470,33 +563,24 @@ test("/pay settles a traditional mandate on chain without an owner session or pa
 });
 
 
-test("a login holds no funds and a Stellar opening publishes one account with a private one-to-one pair", async () => {
-  const { chain, service, owner } = await fixture();
+test("login and legacy opening requests reuse the main account without creating more wallets", async () => {
+  const { chain, service, owner, agentId } = await fixture();
   try {
-    assert.deepEqual((await service.workspace(owner)).accounts, []);
-    assert.equal(chain.wallets.size, 0);
-    const first = (await service.openAccount(owner, { name: "First", type: "stellar", requestId: "first" })).account;
-    const second = (await service.openAccount(owner, { name: "Second", type: "stellar", requestId: "second" })).account;
-    assert.notEqual(chain.owners.get(first.id), chain.owners.get(second.id));
-    const internalAddress = chain.wallet(chain.owners.get(first.id)!).address;
-    const view = await service.workspace(owner);
-    assert.equal(view.accounts.length, 2);
-    assert.ok(view.accounts.every(a => a.rail === "blockchain" && StrKey.isValidContract(a.address!)));
-    assert.equal(JSON.stringify(view).includes(internalAddress), false);
-    assert.equal(JSON.stringify(view).includes("classicAccountId"), false);
-    assert.equal("parent" in view, false);
-    assert.equal("balances" in view.customer, false);
-    const repeat = await service.openAccount(owner, { name: "First", type: "stellar", requestId: "first" });
-    assert.equal(repeat.account.id, first.id);
-    assert.equal(chain.wallets.size, 4);
+    const first = (await service.workspace(owner)).accounts[0]!;
+    const second = (await service.openAccount(owner, { name: "Second", type: "traditional", requestId: "second" })).account;
+    assert.equal(second.id, first.id);
+    const login = await service.login({ email: "owner@example.com", password: "long chain password" });
+    const views = await Promise.all([service.workspace(owner), service.workspace(service.authenticate(login.token))]);
+    assert.ok(views.every(view => view.accounts.length === 1 && view.accounts[0]!.id === first.id));
+    assert.equal(chain.wallets.size, 2);
   } finally { service.close(); }
 });
 
 test("Add funds deposits into the mapped wallet then automatically forwards exactly once", async () => {
-  const { chain, service, owner } = await fixture();
+  const { chain, service, owner, agentId } = await fixture();
   try {
     const account = (await service.openAccount(owner, { name: "Stellar", type: "stellar", requestId: "stellar" })).account;
-    const second = (await service.openAccount(owner, { name: "Second", type: "stellar", requestId: "second" })).account;
+    const second = await sellerAccount(service);
     const internal = chain.wallet(chain.owners.get(account.id)!);
     const original = await chain.balance(internal);
     const entry = await service.fund(owner, account.id, { amount: "5", requestId: "fund" });
@@ -521,7 +605,7 @@ test("funding retries survive a service restart without repeating the deposit", 
   const directory = mkdtempSync(join(tmpdir(), "mandate-funding-recovery-"));
   const path = join(directory, "workspace.sqlite");
   const fixtureResult = await fixture(path);
-  const { chain, owner } = fixtureResult;
+  const { chain, owner, agentId } = fixtureResult;
   let service = fixtureResult.service;
   try {
     const account = (await service.openAccount(owner, { name: "Stellar", type: "stellar", requestId: "stellar" })).account;
@@ -542,8 +626,8 @@ test("funding retries survive a service restart without repeating the deposit", 
 });
 
 
-test("HTTP sessions protect management routes and public payments use only the secret mandate ID", async t => {
-  const { service } = await fixture();
+test("HTTP sessions protect management routes and public payments require the mandate ID and registered agent identification", async t => {
+  const { service, agentId } = await fixture();
   const server = createPaymentApp(service).listen(0, "127.0.0.1");
   await new Promise<void>(resolve => server.once("listening", resolve));
   t.after(async () => { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); service.close(); });
@@ -555,18 +639,18 @@ test("HTTP sessions protect management routes and public payments use only the s
   const cookieHeader = registered.headers.get("set-cookie")!;
   assert.match(cookieHeader, /HttpOnly/i); assert.match(cookieHeader, /SameSite=Strict/i);
   const session = { cookie: cookieHeader.split(";")[0]! };
-  const open = async (name: string) => {
-    const response = await send("/accounts/open", { name, type: "traditional", requestId: name }, session);
-    assert.equal(response.status, 201);
-    return (await response.json() as { account: { id: string; address: string } }).account;
-  };
-  const source = await open("Source"); const seller = await open("Seller");
+  const view = await fetch(base + "/workspace", { headers: session });
+  const source = (await view.json() as { accounts: { id: string; address: string }[] }).accounts[0]!;
+  const seller = await sellerAccount(service);
+  const identityResponse = await send("/agents", { name: "HTTP Buyer", requestId: "http-buyer" }, session);
+  assert.equal(identityResponse.status, 201);
+  const identity = await identityResponse.json() as { id: string };
   assert.equal((await send(`/accounts/${source.id}/funding`, { amount: "10", requestId: "fund" }, { ...session, origin: "https://other.example" })).status, 403);
   assert.equal((await send(`/accounts/${source.id}/funding`, { amount: "10", requestId: "fund" }, session)).status, 201);
   const grant = await send("/mandates", { accountId: source.id, name: "HTTP agent", recipientType: "agent", recipient: "api-agent", limit: "3", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "grant" }, session);
   assert.equal(grant.status, 201);
   const result = await grant.json() as { mandateId: string; mandate: { reference: string } };
-  const payment = { mandateId: result.mandateId, sellerAddress: seller.address, sellerName: "Seller", amount: "2", reference: "Supplies", requestId: "purchase" };
+  const payment = { agentId: identity.id, mandateId: result.mandateId, sellerAddress: seller.address, sellerName: "Seller", amount: "2", reference: "Supplies", requestId: "purchase" };
   const first = await send("/pay", payment);
   assert.equal(first.status, 200);
   const receipt = await first.json() as { status: string; payment: { id: string } };
@@ -586,17 +670,17 @@ test("HTTP sessions protect management routes and public payments use only the s
 
 test("person mandates isolate shared access and enforce on-chain windows, expiry and revocation", async t => {
   t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-11-14T12:00:00Z") });
-  const { service, owner } = await fixture();
+  const { service, owner, agentId } = await fixture();
   try {
     const registered = await service.register({ name: "Holder", email: "holder@example.com", password: "a secure holder password" });
     const holder = service.authenticate(registered.token);
     const source = (await service.openAccount(owner, { name: "Source", type: "traditional", requestId: "source" })).account;
-    const seller = (await service.openAccount(owner, { name: "Seller", type: "traditional", requestId: "seller" })).account;
+    const seller = await sellerAccount(service);
     await service.fund(owner, source.id, { amount: "50", requestId: "fund" });
     const created = await service.createMandate(owner, { accountId: source.id, name: "Allowance", recipientType: "person", recipient: "holder@example.com", limit: "10", period: "day", expiresAt: "2026-11-17T12:00:00Z", requestId: "grant" });
     const shared = await service.workspace(holder);
-    assert.deepEqual(shared.accounts, []); assert.equal(shared.shared.length, 1);
-    const payment = { accountId: source.id, mandateReference: created.mandate.reference, destination: seller.address, amount: "10", reference: "Supplies", requestId: "first" };
+    assert.equal(shared.accounts.length, 1); assert.equal(shared.shared.length, 1);
+    const payment = { agentId, accountId: source.id, mandateReference: created.mandate.reference, destination: seller.address, amount: "10", reference: "Supplies", requestId: "first" };
     await service.pay(holder, payment);
     await assert.rejects(service.pay(holder, { ...payment, requestId: "over-limit" }), { status: 403 });
     await assert.rejects(service.pay(holder, { ...payment, accountId: seller.id, requestId: "other-account" }), { status: 403 });
@@ -614,14 +698,14 @@ test("person mandates isolate shared access and enforce on-chain windows, expiry
 });
 
 test("secret mandate IDs are stable on retries, owner-revealable, and absent from previews and receipts", async t => {
-  const { service, owner, token } = await fixture();
+  const { service, owner, token, agentId } = await fixture();
   const server = createPaymentApp(service).listen(0, "127.0.0.1");
   await new Promise<void>(resolve => server.once("listening", resolve));
   t.after(async () => { await new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())); service.close(); });
   const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api`;
   const send = (path: string, body: unknown, headers = {}) => fetch(base + path, { method: "POST", headers: { "content-type": "application/json", ...headers }, body: JSON.stringify(body) });
   const source = (await service.openAccount(owner, { name: "Source", type: "traditional", requestId: "source" })).account;
-  const seller = (await service.openAccount(owner, { name: "Seller", type: "traditional", requestId: "seller" })).account;
+  const seller = await sellerAccount(service);
   await service.fund(owner, source.id, { amount: "20", requestId: "fund" });
   const details = { accountId: source.id, name: "Purchasing", recipientType: "agent", recipient: "Buyer", limit: "10", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "mandate" };
   const created = await service.createMandate(owner, details);
@@ -639,7 +723,7 @@ test("secret mandate IDs are stable on retries, owner-revealable, and absent fro
   const reveal = await send(path, {}, ownerHeaders);
   assert.equal(reveal.status, 200); assert.equal(reveal.headers.get("cache-control"), "no-store");
   assert.equal((await reveal.json() as { mandateId: string }).mandateId, created.mandateId);
-  const payment = { mandateId: created.mandateId, sellerAddress: seller.address, sellerName: "Seller", amount: "2", reference: "Invoice", requestId: "purchase" };
+  const payment = { agentId, mandateId: created.mandateId, sellerAddress: seller.address, sellerName: "Seller", amount: "2", reference: "Invoice", requestId: "purchase" };
   const publicRef = await send("/pay", { ...payment, mandateId: created.mandate.reference }, { ...ownerHeaders, authorization: `Bearer ${created.mandateId}` });
   assert.equal((await publicRef.json() as { status: string }).status, "declined");
   const missing = await send("/pay", { ...payment, mandateId: undefined }, ownerHeaders);
@@ -663,7 +747,7 @@ test("stored mandates preserve signing rules and secret IDs through normalizatio
   const directory = mkdtempSync(join(tmpdir(), "mandate-secret-id-"));
   const path = join(directory, "workspace.sqlite");
   const result = await fixture(path);
-  const { chain, owner } = result;
+  const { chain, owner, agentId } = result;
   let service = result.service;
   try {
     const account = (await service.openAccount(owner, { name: "Source", type: "traditional", requestId: "source" })).account;
@@ -687,7 +771,7 @@ test("stored mandates preserve signing rules and secret IDs through normalizatio
 });
 
 test("Add funds directly confirms the entered demo USD amount and processes retries once", async t => {
-  const { chain, service, owner, token } = await fixture();
+  const { chain, service, owner, token, agentId } = await fixture();
   const source = (await service.openAccount(owner, { name: "Demo USD", type: "traditional", requestId: "source" })).account;
   const server = createPaymentApp(service).listen(0, "127.0.0.1");
   await new Promise<void>(resolve => server.once("listening", resolve));
@@ -713,7 +797,7 @@ for (const stage of ["deposit", "forward"] as const) {
     const directory = mkdtempSync(join(tmpdir(), "mandate-anchor-recovery-"));
     const path = join(directory, "workspace.sqlite");
     const fixtureResult = await fixture(path);
-    const { chain, owner } = fixtureResult;
+    const { chain, owner, agentId } = fixtureResult;
     let service = fixtureResult.service;
     const store = new WorkspaceStore(path);
     try {
@@ -751,32 +835,34 @@ for (const stage of ["deposit", "forward"] as const) {
 }
 
 test("both account options default to USD mandates and expose only USD balances", async () => {
-  const { chain, service, owner } = await fixture();
+  const { chain, service, owner, agentId } = await fixture();
   try {
     const bank = await service.createAccount(owner, { name: "Bank", type: "traditional", requestId: "bank" });
-    const stellar = await service.createAccount(owner, { name: "Stellar", type: "stellar", requestId: "stellar" });
+    const stellar = await sellerAccount(service);
+    const stellarOwner = { kind: "customer" as const, id: stellar.ownerId };
+    const stellarAgent = await service.createAgent(stellarOwner, { name: "Buyer", requestId: "buyer" });
     assert.equal(bank.currency, "USD"); assert.equal(stellar.currency, "USD");
     await service.fund(owner, bank.id, { amount: "10", requestId: "bank-funding" });
-    await service.fund(owner, stellar.id, { amount: "5", requestId: "stellar-funding" });
+    await service.fund(stellarOwner, stellar.id, { amount: "5", requestId: "stellar-funding" });
     chain.balances.set(stellar.address!, 900_000_000n);
     await service.pay(owner, { accountId: bank.id, destination: stellar.address, amount: "2", reference: "USD", requestId: "usd" });
     const view = await service.workspace(owner);
     assert.ok(view.accounts.every(account => account.currency === "USD" && !("balances" in account)));
-    assert.equal(view.accounts.find(account => account.id === stellar.id)!.balance, "7");
+    assert.equal((await service.workspace(stellarOwner)).accounts[0]!.balance, "7");
     assert.equal(view.network!.currency, "USD");
     const details = { accountId: stellar.id, name: "Dollars", recipientType: "agent", recipient: "Buyer", limit: "1", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "usd-grant" };
-    const created = await service.createMandate(owner, details);
+    const created = await service.createMandate(stellarOwner, details);
     assert.equal(created.mandate.currency, "USD");
     assert.equal(chain.rules.get(created.mandate.ruleId!)!.currency, "USD");
-    await assert.rejects(service.createMandate(owner, { ...details, currency: "XLM", requestId: "xlm-grant" }), { status: 400 });
-    const input = { mandateId: created.mandateId, sellerAddress: bank.address, amount: "0.5", reference: "Return dollars", requestId: "return" };
+    await assert.rejects(service.createMandate(stellarOwner, { ...details, currency: "XLM", requestId: "xlm-grant" }), { status: 400 });
+    const input = { agentId: stellarAgent.id, mandateId: created.mandateId, sellerAddress: bank.address, amount: "0.5", reference: "Return dollars", requestId: "return" };
     assert.equal((await service.previewMandatePayment(input)).currency, "USD");
     assert.equal((await service.payWithMandate({ ...input, accountId: bank.id, currency: "XLM" })).currency, "USD");
     assert.equal(chain.transfers.at(-1)!.source, stellar.address);
     assert.equal(chain.transfers.at(-1)!.currency, "USD");
-    await assert.rejects(service.pay(owner, { accountId: stellar.id, currency: "XLM", destination: bank.address, amount: "0.5", reference: "Wrong asset", requestId: "wrong-currency" }), { status: 400 });
+    await assert.rejects(service.pay(stellarOwner, { accountId: stellar.id, currency: "XLM", destination: bank.address, amount: "0.5", reference: "Wrong asset", requestId: "wrong-currency" }), { status: 400 });
     assert.equal(await chain.balance(chain.wallet(stellar.id), "XLM"), 900_000_000n);
-    assert.equal((await service.workspace(owner)).accounts.find(account => account.id === stellar.id)!.balance, "6.5");
+    assert.equal((await service.workspace(stellarOwner)).accounts[0]!.balance, "6.5");
   } finally { service.close(); }
 });
 
@@ -784,11 +870,13 @@ test("legacy demo accounts upgrade their balance exactly once after interrupted 
   const directory = mkdtempSync(join(tmpdir(), "mandate-legacy-upgrade-"));
   const path = join(directory, "workspace.sqlite");
   const fixtureResult = await fixture(path);
-  const { chain, owner } = fixtureResult;
+  const { chain, owner, agentId } = fixtureResult;
   let service = fixtureResult.service;
   const store = new WorkspaceStore(path);
   try {
     store.update(state => {
+      state.accounts = []; state.stellarPairs = [];
+      delete state.customers[0]!.mainAccountId;
       state.accounts.push({ id: "legacy-bank", ownerId: owner.id, name: "Old demo", type: "traditional", rail: "traditional", balance: "25.50", currency: "USD", address: "BANK_DEMO_OLD", createdAt: new Date().toISOString() });
       state.mandates.push({ id: "legacy-mandate", accountId: "legacy-bank", name: "Old grant", recipientType: "agent", recipient: "Buyer", limit: "10", spent: "0", period: "day", status: "active", expiresAt: new Date(Date.now() + 86400_000).toISOString(), createdAt: new Date().toISOString(), enforcement: "service" });
     });
@@ -813,11 +901,11 @@ test("legacy demo accounts upgrade their balance exactly once after interrupted 
 test("legacy Stellar metadata and cached openings expose USD without reinterpreting existing XLM rules", async () => {
   const directory = mkdtempSync(join(tmpdir(), "mandate-usd-default-"));
   const path = join(directory, "workspace.sqlite");
-  const { chain, service, owner } = await fixture(path);
+  const { chain, service, owner, agentId } = await fixture(path);
   const store = new WorkspaceStore(path);
   try {
     const account = await service.createAccount(owner, { name: "Existing Stellar", type: "stellar", requestId: "existing" });
-    const seller = await service.createAccount(owner, { name: "Recipient", type: "traditional", requestId: "seller" });
+    const seller = await sellerAccount(service);
     const details = { accountId: account.id, name: "Legacy", recipientType: "agent", recipient: "Buyer", limit: "2", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "old-mandate" };
     const legacy = await service.createMandate(owner, details);
     store.update(state => {
@@ -827,26 +915,24 @@ test("legacy Stellar metadata and cached openings expose USD without reinterpret
     chain.rules.get(legacy.mandate.ruleId!)!.currency = "XLM";
     chain.balances.set(account.address!, 500_000_000n);
     chain.usdBalances.set(account.address!, 30_000_000n);
-    const cached = chain.commands.get(`${owner.id}:stellar-opening:existing`)!;
-    cached.result = { ...account, currency: "XLM", balance: "50" };
     const reopened = await service.createAccount(owner, { name: "Existing Stellar", type: "stellar", requestId: "existing" });
     assert.equal(reopened.currency, "USD"); assert.equal(reopened.balance, "3");
     const view = await service.workspace(owner);
     assert.equal(view.accounts[0]!.currency, "USD"); assert.equal(view.accounts[0]!.balance, "3");
     assert.equal("balances" in view.accounts[0]!, false);
     assert.equal(view.mandates[0]!.currency, "XLM");
-    await assert.rejects(service.previewMandatePayment({ mandateId: legacy.mandateId, sellerAddress: seller.address, amount: "1" }), { status: 400 });
+    await assert.rejects(service.previewMandatePayment({ agentId, mandateId: legacy.mandateId, sellerAddress: seller.address, amount: "1" }), { status: 400 });
     await service.fund(owner, account.id, { amount: "1", requestId: "new-funding" });
     const usd = await service.createMandate(owner, { ...details, requestId: "new-usd-mandate" });
     assert.equal(usd.mandate.currency, "USD");
-    assert.equal((await service.payWithMandate({ mandateId: usd.mandateId, sellerAddress: seller.address, amount: "0.5", reference: "USD", requestId: "usd-payment" })).currency, "USD");
+    assert.equal((await service.payWithMandate({ agentId, mandateId: usd.mandateId, sellerAddress: seller.address, amount: "0.5", reference: "USD", requestId: "usd-payment" })).currency, "USD");
     assert.equal(await chain.balance(chain.wallet(account.id), "USD"), 35_000_000n);
     assert.equal(await chain.balance(chain.wallet(account.id), "XLM"), 500_000_000n);
   } finally { store.close(); service.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
 test("one account can be opened without a type and funded by FIAT or automatic Testnet", async () => {
-  const { chain, service, owner } = await fixture();
+  const { chain, service, owner, agentId } = await fixture();
   try {
     const input = { name: "Operations", requestId: "unified-opening" };
     const opened = await service.openAccount(owner, input);
@@ -877,13 +963,13 @@ test("one account can be opened without a type and funded by FIAT or automatic T
 });
 
 test("seller restrictions are saved without verification and enforced for every mandate payment path", async () => {
-  const { chain, service, owner } = await fixture();
+  const { chain, service, owner, agentId } = await fixture();
   try {
     const source = await service.createAccount(owner, { name: "Source", requestId: "source" });
     const registered = await service.register({ name: "Seller", email: "seller@example.com", password: "long seller password" });
     const holder = service.authenticate(registered.token);
     const allowed = await service.createAccount(holder, { name: "Allowed", requestId: "allowed" });
-    const blocked = await service.createAccount(owner, { name: "Blocked", requestId: "blocked" });
+    const blocked = await sellerAccount(service);
     assert.ok(Number.isSafeInteger(allowed.sellerId));
     assert.notEqual(allowed.sellerId, blocked.sellerId);
     await service.fund(owner, source.id, { amount: "10", requestId: "fund" });
@@ -896,14 +982,14 @@ test("seller restrictions are saved without verification and enforced for every 
     assert.deepEqual((await service.workspace(holder)).shared[0]!.mandate.sellerIds, created.mandate.sellerIds);
     await assert.rejects(service.createMandate(owner, { ...details, sellerIds: [blocked.sellerId!] }), { status: 409 });
 
-    const input = { mandateId: created.mandateId, sellerAddress: blocked.address, sellerName: allowed.name, sellerId: allowed.sellerId, amount: "1", reference: "Purchase", requestId: "blocked-public" };
+    const input = { agentId, mandateId: created.mandateId, sellerAddress: blocked.address, sellerName: allowed.name, sellerId: allowed.sellerId, amount: "1", reference: "Purchase", requestId: "blocked-public" };
     const preview = await service.previewMandatePayment(input);
     assert.equal(preview.seller.verified, true);
     assert.equal(preview.checks.find(check => check.label.includes("seller ID list"))!.passed, false);
     const before = chain.transfers.length;
     await assert.rejects(service.payWithMandate(input), { status: 403, message: "Seller is not in this mandate's allowed seller ID list" });
     for (const actor of [owner, holder]) {
-      await assert.rejects(service.pay(actor, { accountId: source.id, mandateReference: created.mandate.reference, destination: blocked.address, amount: "1", reference: "Purchase", requestId: `blocked-${actor.id}` }), { status: 403 });
+      await assert.rejects(service.pay(actor, { agentId, accountId: source.id, mandateReference: created.mandate.reference, destination: blocked.address, amount: "1", reference: "Purchase", requestId: `blocked-${actor.id}` }), { status: 403 });
     }
     assert.equal(chain.transfers.length, before);
     assert.equal(await chain.spent(chain.wallet(source.id), created.mandate.ruleId!), 0n);
@@ -924,17 +1010,75 @@ test("seller restrictions are saved without verification and enforced for every 
 });
 
 test("a seller ID may be listed before its account exists and remains stable on account retries", async () => {
-  const { service, owner } = await fixture();
+  const { service, owner, agentId } = await fixture();
   try {
     const source = await service.createAccount(owner, { name: "Source", requestId: "source" });
     const futureId = source.sellerId! + 1;
     const created = await service.createMandate(owner, { accountId: source.id, name: "Future seller", recipientType: "agent", recipient: "Buyer", limit: "1", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), sellerIds: [futureId], requestId: "future" });
     const sellerInput = { name: "Future seller", requestId: "seller" };
-    const seller = await service.createAccount(owner, sellerInput);
+    const seller = await sellerAccount(service);
+    const sellerActor = { kind: "customer" as const, id: seller.ownerId };
     assert.equal(seller.sellerId, futureId);
-    assert.equal((await service.createAccount(owner, sellerInput)).sellerId, futureId);
+    assert.equal((await service.createAccount(sellerActor, sellerInput)).sellerId, futureId);
     await service.fund(owner, source.id, { amount: "1", requestId: "fund" });
-    assert.equal((await service.previewMandatePayment({ mandateId: created.mandateId, sellerAddress: seller.address, amount: "1" })).checks.every(check => check.passed), true);
-    await service.payWithMandate({ mandateId: created.mandateId, sellerAddress: seller.address, amount: "1", reference: "Future purchase", requestId: "pay" });
+    assert.equal((await service.previewMandatePayment({ agentId, mandateId: created.mandateId, sellerAddress: seller.address, amount: "1" })).checks.every(check => check.passed), true);
+    await service.payWithMandate({ agentId, mandateId: created.mandateId, sellerAddress: seller.address, amount: "1", reference: "Future purchase", requestId: "pay" });
+  } finally { service.close(); }
+});
+
+test("agent registrations persist, stay account-scoped, and publish only after chain confirmation", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mandate-agents-"));
+  const path = join(directory, "workspace.sqlite");
+  const result = await fixture(path);
+  const { chain, owner, agentId } = result;
+  let service = result.service;
+  try {
+    const input = { name: "Researcher", requestId: "researcher" };
+    chain.fail = true;
+    await assert.rejects(service.createAgent(owner, input));
+    assert.equal((await service.workspace(owner)).agents.length, 1);
+    chain.fail = false;
+    const agent = await service.createAgent(owner, input);
+    assert.equal((await service.createAgent(owner, input)).id, agent.id);
+    await assert.rejects(service.createAgent(owner, { ...input, name: "Changed" }), { status: 409 });
+    const other = await service.register({ name: "Other", email: "agent-other@example.com", password: "another secure password" });
+    assert.deepEqual((await service.workspace(service.authenticate(other.token))).agents, []);
+    service.close(); service = new StellarPaymentService(path, chain);
+    const view = await service.workspace(owner);
+    assert.deepEqual(view.agents.map(agent => agent.id), [agentId, agent.id]);
+    assert.ok(view.agents.every(agent => agent.verified && agent.verificationTxHash));
+    chain.agents.delete(`${view.accounts[0]!.address}:${agent.id}`);
+    assert.equal((await service.workspace(owner)).agents.find(saved => saved.id === agent.id)!.verified, false);
+  } finally { service.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("payments require a chain-registered account agent and allow every agent on that account", async () => {
+  const { chain, service, owner, agentId } = await fixture();
+  try {
+    const account = (await service.workspace(owner)).accounts[0]!;
+    const second = await service.createAgent(owner, { name: "Assistant", requestId: "assistant" });
+    const seller = await sellerAccount(service);
+    const foreign = await service.createAgent({ kind: "customer", id: seller.ownerId }, { name: "Foreign", requestId: "foreign" });
+    await service.fund(owner, account.id, { amount: "10", requestId: "fund" });
+    const grant = await service.createMandate(owner, { name: "Purchasing", recipientType: "agent", recipient: "Team", limit: "2", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "grant" });
+    const input = { mandateId: grant.mandateId, agentId, sellerAddress: seller.address, sellerName: "Seller", amount: "0.5", reference: "Purchase", requestId: "first" };
+    const before = chain.transfers.length;
+    for (const invalid of [undefined, "", "unknown", foreign.id]) {
+      await assert.rejects(service.previewMandatePayment({ ...input, agentId: invalid }));
+      await assert.rejects(service.payWithMandate({ ...input, agentId: invalid }));
+    }
+    assert.equal(chain.transfers.length, before);
+    const preview = await service.previewMandatePayment(input);
+    assert.equal(preview.agent.id, agentId);
+    const first = await service.payWithMandate(input);
+    assert.equal(first.agentId, agentId);
+    assert.equal((await service.payWithMandate(input)).id, first.id);
+    await assert.rejects(service.payWithMandate({ ...input, agentId: second.id }), { status: 409 });
+    const next = await service.payWithMandate({ ...input, agentId: second.id, requestId: "second" });
+    assert.equal(next.agentId, second.id);
+    chain.agents.delete(`${account.address}:${agentId}`);
+    await assert.rejects(service.payWithMandate({ ...input, requestId: "revoked-agent" }), { status: 403 });
+    await assert.rejects(service.pay(owner, { accountId: account.id, mandateReference: grant.mandate.reference, destination: seller.address, amount: "0.5", reference: "Bypass", requestId: "bypass" }), { status: 401 });
+    assert.equal((await service.workspace(owner)).mandates[0]!.spent, "1");
   } finally { service.close(); }
 });

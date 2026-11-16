@@ -578,3 +578,18 @@ main > .workspace-note { margin-top: -16px; }
 @media (max-width: 600px) { .two-choices { grid-template-columns: 1fr; } .account-opening-summary > div { display: grid; gap: 3px; } .account-opening-form { padding: 20px; } .topbar { flex-wrap: wrap; } .topbar-side { flex-wrap: wrap; } }
 
 .secret-mandate { display: grid; gap: 10px; min-width: 0; }
+
+.main-account { display: grid; gap: 16px; padding: 26px; min-width: 0; }
+.main-account-summary { display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 24px; }
+.main-account-summary .balance { margin: 10px 0; }
+.main-account-summary .account-verification { margin: 0 0 8px; }
+.main-account-stats { padding-left: 24px; border-left: 1px solid var(--line); }
+@media (max-width: 650px) { .main-account { padding: 20px; } .main-account-stats { padding-left: 0; border: 0; } }
+
+.agents-section { display: grid; gap: 20px; }
+.agent-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: 20px; }
+.agent-card { display: grid; gap: 20px; padding: 24px; min-width: 0; }
+.agent-heading { display: flex; align-items: center; gap: 14px; }
+.agent-heading .verified, .agent-heading .form-error { font-size: 13px; }
+.agent-identity { display: grid; gap: 10px; }
+.agent-identity .button { justify-self: start; }

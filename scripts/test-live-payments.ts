@@ -23,22 +23,28 @@ const receipts: { step: string; txHash: string }[] = [];
 const save = (step: string, txHash: string) => { receipts.push({ step, txHash }); console.log(`${step}: ${txHash}`); };
 
 try {
-  const registered = await service.register({ name: "Two-option integration", email: `test-${Date.now()}@example.com`, password: "generated test account password" });
-  const owner = service.authenticate(registered.token);
-  const bank = (await service.openAccount(owner, { name: "Traditional source", type: "traditional", requestId: "bank-source" })).account;
-  const bankSeller = (await service.openAccount(owner, { name: "Traditional recipient", type: "traditional", requestId: "bank-seller" })).account;
+  const newUser = async (name: string) => {
+    const registered = await service.register({ name, email: `test-${Date.now()}-${name.replaceAll(" ", "-")}@example.com`, password: "generated test account password" });
+    const actor = service.authenticate(registered.token);
+    return { actor, account: (await service.workspace(actor)).accounts[0]! };
+  };
+  const { actor: owner, account: smart } = await newUser("Sender");
+  const { actor: bankOwner, account: bank } = await newUser("Second sender");
+  const { account: bankSeller } = await newUser("Second seller");
+  const { actor: sellerOwner, account: seller } = await newUser("Seller");
   assert.ok(bank.verified && bankSeller.verified);
-  await service.fund(owner, bank.id, { amount: "100", requestId: "fund-bank" });
-  const demoPayment = await service.pay(owner, { accountId: bank.id, amount: "1", destination: bankSeller.address, reference: "Bank demo payment", requestId: "bank-pay" });
+  await service.fund(bankOwner, bank.id, { amount: "100", requestId: "fund-bank" });
+  const demoPayment = await service.pay(bankOwner, { accountId: bank.id, amount: "1", destination: bankSeller.address, reference: "Bank demo payment", requestId: "bank-pay" });
   assert.equal(demoPayment.settlement, "stellar-testnet"); assert.ok(demoPayment.txHash);
   assert.equal(demoPayment.currency, "USD");
   save("Traditional USD payment", demoPayment.txHash);
   assert.ok(bank.address!.startsWith("C") && bankSeller.address!.startsWith("C"));
   console.log("Demo USD → Classic trustline → Smart Account funding and USD payment: passed");
-  const smart = (await service.openAccount(owner, { name: "Verified sender", type: "stellar", requestId: "smart" })).account;
   save("Smart opening", smart.creationTxHash!); save("Smart verification", smart.verificationTxHash!);
-  const seller = (await service.openAccount(owner, { name: "Verified seller", type: "stellar", requestId: "seller" })).account;
   save("Seller opening", seller.creationTxHash!); save("Seller verification", seller.verificationTxHash!);
+  const agent = await service.createAgent(owner, { name: "Buyer", requestId: "buyer" });
+  save("Agent registration", agent.verificationTxHash);
+  const bankAgent = await service.createAgent(bankOwner, { name: "Second buyer", requestId: "buyer" });
   const created = await service.createMandate(owner, { accountId: smart.id, name: "Third-party purchasing", recipientType: "agent", recipient: "External tester", limit: "0.2", period: "day", expiresAt: new Date(Date.now() + 3600_000).toISOString(), requestId: "mandate" });
   const opening = { account: smart, ...created };
   const mandate = created.mandate;
@@ -58,7 +64,7 @@ try {
   assert.equal(new Set(pairs.map(pair => pair.classicWalletId)).size, 4);
   const treasury = chain.wallet(pairs.find(pair => pair.accountId === smart.id)!.classicWalletId);
   const unverified = await chain.createAccount("unverified-test-seller", treasury);
-  const input = { mandateId: opening.mandateId, sellerAddress: seller.address, sellerName: "Verified seller", amount: "0.1", reference: "Third-party purchase", requestId: "third-party-pay" };
+  const input = { agentId: agent.id, mandateId: opening.mandateId, sellerAddress: seller.address, sellerName: "Verified seller", amount: "0.1", reference: "Third-party purchase", requestId: "third-party-pay" };
   const send = async (body: typeof input) => {
     // No browser cookie or owner login is supplied here.
     const response = await fetch(`http://127.0.0.1:${port}/api/pay`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -69,6 +75,8 @@ try {
   assert.equal((await send({ ...input, mandateId: "wrong-mandate-id" })).status, "declined");
   assert.equal((await send({ ...input, sellerAddress: unverified.address, requestId: "unverified-seller" })).status, "declined");
   assert.equal((await send({ ...input, sellerAddress: treasury.address, requestId: "classic-seller" })).status, "declined");
+  assert.equal((await send({ ...input, agentId: "unknown-agent", requestId: "unknown-agent" })).status, "declined");
+  assert.equal((await send({ ...input, agentId: bankAgent.id, requestId: "foreign-agent" })).status, "declined");
   const paid = await send(input);
   assert.equal(paid.status, "paid");
   if (paid.status !== "paid") throw new Error("Expected successful payment");
@@ -77,7 +85,7 @@ try {
   assert.ok(repeated.status === "paid" && repeated.payment.txHash === paid.payment.txHash);
   assert.equal((await send({ ...input, amount: "0.2", requestId: "over-limit" })).status, "declined");
   // Bypass all service checks: both rules must still be enforced by the contract.
-  const rule = { id: mandate.reference, ruleId: mandate.ruleId! };
+  const rule = { id: mandate.reference, ruleId: mandate.ruleId!, agentId: agent.id };
   const wallet = chain.wallet(opening.account.id);
   const currency = "USD";
   assert.equal(smart.currency, "USD");
@@ -97,18 +105,18 @@ try {
   assert.equal("classicAccountId" in smart, false);
   assert.equal(JSON.stringify(workspace).includes(treasury.address), false);
   assert.equal(workspace.accounts.find(a => a.id === opening.account.id)!.balance, "4.8");
-  assert.equal(workspace.accounts.find(a => a.id === seller.id)!.balance, "0.2");
-  assert.equal(workspace.accounts.find(a => a.id === seller.id)!.verified, true);
+  assert.equal((await service.workspace(sellerOwner)).accounts[0]!.balance, "0.2");
+  assert.equal((await service.workspace(sellerOwner)).accounts[0]!.verified, true);
   assert.equal(workspace.accounts.find(a => a.id === opening.account.id)!.verified, true);
-  assert.equal(workspace.accounts.length, 4, "Mandate creation must use the source account, not open an account");
+  assert.equal(workspace.accounts.length, 1, "Each user has one automatically provisioned main account");
   // Fund a traditional Smart Account with XLM too, so wrong-asset rejection
   // cannot be explained by an insufficient XLM balance.
   await chain.transfer("xlm-for-scope-test", treasury, treasury, bank.address!, 1_000_000n);
   assert.equal(await chain.balance(chain.wallet(bank.id), "XLM"), 1_000_000n);
   // USD uses the same mandate and registry policies, scoped to the USD SAC.
-  const usdGrant = await service.createMandate(owner, { accountId: bank.id, name: "USD purchasing", recipientType: "agent", recipient: "USD buyer", limit: "0.5", period: "day", expiresAt: new Date(Date.now() + 3600_000).toISOString(), requestId: "usd-mandate" });
+  const usdGrant = await service.createMandate(bankOwner, { accountId: bank.id, name: "USD purchasing", recipientType: "agent", recipient: "USD buyer", limit: "0.5", period: "day", expiresAt: new Date(Date.now() + 3600_000).toISOString(), requestId: "usd-mandate" });
   assert.equal(usdGrant.mandate.currency, "USD");
-  const usdInput = { ...input, mandateId: usdGrant.mandateId, amount: "0.25", requestId: "usd-public-payment" };
+  const usdInput = { ...input, agentId: bankAgent.id, mandateId: usdGrant.mandateId, amount: "0.25", requestId: "usd-public-payment" };
   const usdPreview = await service.previewMandatePayment(usdInput);
   assert.equal(usdPreview.currency, "USD"); assert.equal(usdPreview.mandate.address, bank.address);
   assert.ok(usdPreview.checks.every(check => check.passed));
@@ -120,28 +128,28 @@ try {
   const usdRepeated = await send(usdInput);
   assert.ok(usdRepeated.status === "paid" && usdRepeated.payment.txHash === usdPaid.payment.txHash);
   const bankTreasury = chain.wallet(pairs.find(pair => pair.accountId === bank.id)!.classicWalletId);
-  const usdRule = { id: usdGrant.mandate.reference, ruleId: usdGrant.mandate.ruleId! };
+  const usdRule = { id: usdGrant.mandate.reference, ruleId: usdGrant.mandate.ruleId!, agentId: bankAgent.id };
   await assert.rejects(chain.transfer("usd-direct-overspend", bankTreasury, chain.wallet(bank.id), seller.address!, 3_000_000n, usdRule, "USD"));
   await assert.rejects(chain.transfer("usd-wrong-asset", bankTreasury, chain.wallet(bank.id), seller.address!, 1n, usdRule, "XLM"));
   await assert.rejects(chain.transfer("usd-direct-unverified", bankTreasury, chain.wallet(bank.id), unverified.address, 1n, usdRule, "USD"));
   await assert.rejects(chain.transfer("usd-direct-classic", bankTreasury, chain.wallet(bank.id), bankTreasury.address, 1n, usdRule, "USD"));
-  await service.revoke(owner, usdGrant.mandate.reference);
+  await service.revoke(bankOwner, usdGrant.mandate.reference);
   await assert.rejects(chain.transfer("usd-direct-revoked", bankTreasury, chain.wallet(bank.id), seller.address!, 1n, usdRule, "USD"));
   // Spend received USD from the same balance shown on the dashboard.
-  const returned = await service.pay(owner, { accountId: seller.id, destination: bankSeller.address, amount: "0.1", reference: "Received USD payment", requestId: "received-usd" });
+  const returned = await service.pay(sellerOwner, { accountId: seller.id, destination: bankSeller.address, amount: "0.1", reference: "Received USD payment", requestId: "received-usd" });
   save("Stellar account spends received USD", returned.txHash!);
   const final = await service.workspace(owner);
-  assert.equal(final.accounts.find(account => account.id === bank.id)!.balance, "98.75");
+  assert.equal((await service.workspace(bankOwner)).accounts[0]!.balance, "98.75");
   assert.ok(final.accounts.every(account => account.currency === "USD" && !("balances" in account)));
-  assert.equal(final.accounts.find(account => account.id === bankSeller.id)!.balance, "1.1");
-  assert.equal(final.accounts.find(account => account.id === seller.id)!.balance, "0.35");
+  assert.equal(await chain.balance(chain.wallet(bankSeller.id), "USD"), 11_000_000n);
+  assert.equal((await service.workspace(sellerOwner)).accounts[0]!.balance, "0.35");
   const usdAsset = chain.network.assets!.find(asset => asset.currency === "USD")!;
   assert.ok(usdAsset.issuer && usdAsset.tokenContract !== chain.network.tokenContract);
   const journal = new (await import("../apps/receipts/src/payments/store.ts")).WorkspaceStore(path);
   assert.equal("fiatAccounts" in journal.read(), false);
   assert.equal("anchorDeposits" in journal.read(), false);
   journal.close();
-  const proof = { fundingTransactions, network: chain.network.id, policy: config.verifiedSmartPolicy, usdAsset, traditionalAccount: { source: bank.address, recipient: bankSeller.address, paymentId: demoPayment.id }, smart: smart.address, seller: seller.address, mandate: { reference: mandate.reference, account: opening.account.address }, checks: ["login holds no funds", "one-to-one private mapping", "direct funding without fiat ledger", "single Add funds deposits then forwards", "Smart to Smart payment", "third-party without owner session", "idempotent retry", "wrong mandate ID rejected", "Classic recipient rejected", "unverified Smart recipient rejected", "spending limit enforced on chain", "revocation enforced on chain", "USD mandate cannot authorize XLM with sufficient XLM balance", "USD mandate to Stellar account", "USD-only balances and mandates for both account options"], receipts };
+  const proof = { fundingTransactions, network: chain.network.id, policy: config.verifiedSmartPolicy, usdAsset, traditionalAccount: { source: bank.address, recipient: bankSeller.address, paymentId: demoPayment.id }, smart: smart.address, seller: seller.address, mandate: { reference: mandate.reference, account: opening.account.address }, agent: { id: agent.id, registrationTxHash: agent.verificationTxHash }, checks: ["signup provisions one main account", "one-to-one private mapping", "direct funding without fiat ledger", "single Add funds deposits then forwards", "Smart to Smart payment", "third-party without owner session", "agent identification verified on chain", "unknown and foreign agent IDs rejected", "idempotent retry", "wrong mandate ID rejected", "Classic recipient rejected", "unverified Smart recipient rejected", "spending limit enforced on chain", "revocation enforced on chain", "USD mandate cannot authorize XLM with sufficient XLM balance", "USD mandate to Stellar account", "USD-only balances and mandates for both account options"], receipts };
   assert.equal(JSON.stringify(proof).includes(usdGrant.mandateId), false);
   assert.equal(JSON.stringify(proof).includes(opening.mandateId), false, "Public receipts must not contain the secret mandate ID");
   writeFileSync(join(directory, "receipts.json"), JSON.stringify(proof, null, 2));

@@ -27,12 +27,17 @@ if (!values.SMART_ACCOUNT_WASM_HASH) {
 for (const [setting, name, args] of [
   ["ED25519_VERIFIER_ID", "mandate_ed25519_verifier", []],
   ["SPENDING_LIMIT_POLICY_ID", "mandate_spending_limit_policy", []],
+  ["AGENT_REGISTRY_ID", "mandate_agent_registry", ["--admin", admin]],
   ["SELLER_REGISTRY_ID", "mandate_seller_registry", ["--admin", admin]],
   ["PAYMENTS_VERIFIED_SMART_POLICY_ID", "mandate_verified_smart_policy", []],
 ] as const) {
   if (values[setting]) continue;
   values[setting] = run(["contract", "deploy", ...network, "--source", identity, "--wasm", wasm(name), ...(args.length ? ["--", ...args] : [])]);
   console.log(`${setting}: ${values[setting]}`);
+}
+if (!values.AGENT_VERIFIER_ID) {
+  values.AGENT_VERIFIER_ID = run(["contract", "deploy", ...network, "--source", identity, "--wasm", wasm("mandate_agent_verifier"), "--", "--registry", values.AGENT_REGISTRY_ID!]);
+  console.log(`AGENT_VERIFIER_ID: ${values.AGENT_VERIFIER_ID}`);
 }
 if (!values.PAYMENTS_REGISTRY_ADMIN_SECRET) {
   try { values.PAYMENTS_REGISTRY_ADMIN_SECRET = run(["keys", "secret", identity]); }

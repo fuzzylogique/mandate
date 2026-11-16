@@ -8,18 +8,21 @@ export interface PayToolOptions {
   mandateId: string;
   /** Seller's verified Smart Account C address. */
   sellerId: string;
+  /** Public identification registered to the source account on chain. */
+  agentId: string;
   /** Payments service origin, without /api/pay. */
   apiUrl?: string;
 }
 
-export function createPayTool({ mandateId, sellerId, apiUrl = "http://localhost:4022" }: PayToolOptions) {
+export function createPayTool({ mandateId, agentId, sellerId, apiUrl = "http://localhost:4022" }: PayToolOptions) {
+  const identity = z.string().trim().min(1).max(128).parse(agentId);
   const secret = z.string().trim().min(1).max(128).parse(mandateId);
   const sellerAddress = z.string().trim().regex(/^C[A-Z2-7]{55}$/, "Seller ID must be a Smart Account C address").parse(sellerId);
   const endpoint = new URL("/api/pay", apiUrl);
 
   return tool(async ({ amount, reference, requestId }): Promise<MandatePaymentResult> => {
     const body: MandatePaymentInput = {
-      mandateId: secret, sellerAddress, sellerName: "Seller", amount, reference, requestId,
+      mandateId: secret, agentId: identity, sellerAddress, sellerName: "Seller", amount, reference, requestId,
     };
     const response = await fetch(endpoint, {
       method: "POST",

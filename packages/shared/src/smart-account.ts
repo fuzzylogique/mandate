@@ -14,10 +14,12 @@ import {
 export interface SmartAccountSigner {
   /** The smart account (C-address) being authorized. */
   smartAccount: string;
-  /** Deployed ed25519 verifier contract (C-address). */
+  /** Deployed signature verifier contract (C-address). */
   verifier: string;
   /** Key registered on the rule as `Signer::External(verifier, public key)`. */
   keypair: Keypair;
+  /** Agent-aware mandate verifier: registry identity bound into the signature. */
+  agentId?: string;
 }
 
 const symbol = (name: string) => xdr.ScVal.scvSymbol(name);
@@ -30,6 +32,14 @@ export function externalSigner(verifier: string, keypair: Keypair): xdr.ScVal {
     Address.fromString(verifier).toScVal(),
     xdr.ScVal.scvBytes(keypair.rawPublicKey()),
   ]);
+}
+
+export function agentSigner(verifier: string, keypair: Keypair, account: string): xdr.ScVal {
+  const key = xdr.ScVal.scvMap([
+    mapEntry("account", Address.fromString(account).toScVal()),
+    mapEntry("public_key", xdr.ScVal.scvBytes(keypair.rawPublicKey())),
+  ]);
+  return xdr.ScVal.scvVec([symbol("External"), Address.fromString(verifier).toScVal(), xdr.ScVal.scvBytes(key.toXDR())]);
 }
 
 /** Address credentials of an auth entry, for both credential versions. */
@@ -87,7 +97,16 @@ export function signSmartAccountAuthEntry(
     mapEntry("context_rule_ids", ruleIds),
     mapEntry("signature_payload", xdr.ScVal.scvBytes(signaturePayload)),
   ]);
-  const signature = signer.keypair.sign(hash(digestPreimage.toXDR()));
+  const payload = hash(digestPreimage.toXDR());
+  const agentDigest = signer.agentId ? xdr.ScVal.scvMap([
+    mapEntry("agent_id", xdr.ScVal.scvString(signer.agentId)),
+    mapEntry("payload", xdr.ScVal.scvBytes(payload)),
+  ]) : undefined;
+  const signature = signer.keypair.sign(agentDigest ? hash(agentDigest.toXDR()) : payload);
+  const signatureData = signer.agentId ? xdr.ScVal.scvMap([
+    mapEntry("agent_id", xdr.ScVal.scvString(signer.agentId)),
+    mapEntry("signature", xdr.ScVal.scvBytes(signature)),
+  ]).toXDR() : signature;
 
   // AuthPayload { context_rule_ids, signers: Map<Signer, Bytes> }
   const authPayload = xdr.ScVal.scvMap([
@@ -96,8 +115,8 @@ export function signSmartAccountAuthEntry(
       "signers",
       xdr.ScVal.scvMap([
         new xdr.ScMapEntry({
-          key: externalSigner(signer.verifier, signer.keypair),
-          val: xdr.ScVal.scvBytes(signature),
+          key: signer.agentId ? agentSigner(signer.verifier, signer.keypair, signer.smartAccount) : externalSigner(signer.verifier, signer.keypair),
+          val: xdr.ScVal.scvBytes(signatureData),
         }),
       ]),
     ),

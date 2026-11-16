@@ -1,10 +1,8 @@
 # Mandate
 
-An email/password payment workspace with one account-opening flow. Each account exposes one Smart Account C address and uses on-chain mandates and payments. Choose **FIAT** or **Testnet** when adding funds.
+An email/password payment workspace with one main account per user. Signup automatically provisions a private Classic wallet and a verified Smart Account. Choose **FIAT** or **Testnet** when adding funds.
 
-The login holds no money. Every account has a private, one-to-one mapping
-between its Smart contract and a Classic wallet. Add funds issues demo USD directly, without an intermediate fiat ledger.
-Opening and funding manage the wallet mapping in the background. Users never select or manage the Classic wallet.
+The dashboard shows your main account and USD balance at the top, followed by **Agents**, **Mandates** and **Activity**. There is no separate account-opening step. The Classic wallet stays private and is managed automatically.
 
 ## Run
 
@@ -35,14 +33,14 @@ are reused. See [Stellar setup](docs/stellar-testnet.md).
 
 ## Accounts and funding
 
-Choose **Accounts → Open account** and enter a name. The account starts with zero visible balance. There is no account-type choice.
+Create an account with your name, email and password. Your main account starts with zero USD balance and is ready to fund after signup. If network setup is interrupted, sign in again to resume the same wallet pair.
 
-Accounts automatically provision a dedicated Classic wallet, deploy a
-Smart contract, install asset-specific payment policies, and register the C address
+Signup automatically provisions a dedicated Classic wallet, deploys a
+Smart contract, installs asset-specific payment policies, and registers the C address
 as a verified recipient. The dashboard shows the Smart Account address and live
 USD balance. The Classic wallet remains private.
 
-**Add funds** offers two methods on every account: **FIAT** adds demo USD without a bank or card charge; **Testnet** uses the existing automatic Stellar testnet funding flow. Both credit the same on-chain USD balance:
+**Add funds** in the main account summary offers two methods: **FIAT** adds demo USD without a bank or card charge; **Testnet** uses the existing automatic Stellar testnet funding flow. Both credit the same on-chain USD balance:
 
 1. Choose FIAT or Testnet, enter a USD amount with up to two decimal places and click **Add funds**.
 2. The demo issuer sends that exact amount to the account's mapped Classic wallet, creating its USD trustline automatically.
@@ -74,13 +72,23 @@ links. Older local demo receipts remain marked as historical simulated activity.
 The dashboard refreshes when returning to its tab and every 15 seconds.
 Payments back to the source account are rejected.
 
+## Agents and on-chain identification
+
+The **Agents** tab lists the agents associated with your main account. **Add agent** registers a name and a stable public identification value (`agt_…`). Agents have no balance or spending limits of their own. Any agent registered to an account can use any of that account's mandates.
+
+The service attests `(Smart Account C address, agent ID)` in an administrator-controlled agent registry, following the seller-verification pattern. Registrations appear only after chain confirmation, and the dashboard checks their current on-chain status. Agent names are display labels; the registry entry determines membership. Identification is public and is not a separate bearer secret or proof of legal identity.
+
+Payments require both the secret `mandateId` and the registered `agentId`. The mandate verifier checks the on-chain registry during Smart Account authorization. The mandate signature binds the agent ID to the account, rule and payment digest, and emits an on-chain agent authorization event. Foreign, missing, unknown or revoked identities cannot authorize a mandate payment. The API records `agentId` in activity and receipts. Existing mandate rules are upgraded before payment by replacing the old signer with the agent-aware verifier; their limits and spending history remain intact.
+
+Run `pnpm setup:contracts` for an existing checkout to deploy the agent registry and verifier and save their IDs. Existing agents are never inferred from mandate-holder names.
+
 ## Mandates and third-party payments
 
 There is one mandate flow for all accounts. A mandate grants a person or
 agent spending access to an existing Smart Account's USD balance.
-Creating one does not open an account or create another balance.
+Creating one does not open an account or create another balance. No source-account selection is needed.
 
-1. Open **Mandates** and select a verified source account.
+1. Open **Mandates**. New mandates automatically use your main account.
 2. Enter the holder, USD limit, rolling period and expiry. Optionally type seller IDs separated by commas or spaces (for example, `101, 202, 303`).
 3. Use **Show mandate** to reveal and save the secret mandate ID. The Pay link is simply `/pay`.
 
@@ -100,12 +108,12 @@ to its seller ID and enforces the list. Seller verification is still required at
 time and enforced on chain; the numeric seller list is enforced by the payment service.
 The API accepts the optional field as `sellerIds: [101, 202, 303]`.
 
-The holder opens `/pay` without an owner login, enters the secret mandate ID and
+The holder opens `/pay` without an owner login, enters the secret mandate ID, their registered agent identification and
 the seller's Smart Account C address copied from their dashboard, then checks and
 submits the payment. The mandate determines the buyer's source account and currency;
 there is no payment-method selector. The recipient's display name does not establish verification.
 
-The secret ID is a bearer credential. It never appears in links or receipts.
+The secret mandate ID is a bearer credential; the public agent ID identifies the paying agent and must be registered to the source account. It never appears in links or receipts.
 The Pay page always masks it. The owner's dashboard reveals it only after
 **Show mandate**, and clears it after **Hide mandate**. **Copy mandate ID** retrieves
 the secret through the owner-authenticated endpoint and copies it without revealing
@@ -113,6 +121,8 @@ it in the field. Copy buttons work while masked or visible.
 Invalid IDs, unverified recipients, limits, expiry, revocation and insufficient
 funds decline payment. Unchanged retries reuse their request ID. Pending blockchain
 transactions are reported as pending until confirmed.
+
+Existing users keep their first account as their main account, and users without an account receive one automatically on login or workspace load. Historical accounts, mandates and funds are retained; no balances are combined or moved.
 
 Existing local traditional accounts are upgraded when their workspace loads:
 their old demo balances are issued exactly once into testnet USD, with recovery
@@ -125,7 +135,7 @@ Stellar verification uses **an on-chain registry entry keyed by the exact recipi
 Smart Account C address**. A valid address or seller display name alone does not
 establish verification.
 
-When opening an account, the service checks that the deployed contract responds
+During automatic account setup, the service checks that the deployed contract responds
 to `get_context_rule(0)`. The registry administrator then calls
 `register(C_address, "workspace/<account-id>")`. The registry stores that address,
 metadata and verification ledger. Only its administrator can register or revoke entries.
@@ -134,7 +144,7 @@ Before payment, the API calls `is_verified(C_address)`. The sender's payment pol
 checks that same registry during on-chain authorization. A mandate additionally
 checks its spending limit. Revoking a recipient's registry entry blocks later payments.
 
-The prototype automatically attests accounts it opens. It does not perform KYC,
+The prototype automatically attests accounts it provisions. It does not perform KYC,
 business verification or domain-ownership verification. All accounts use
 this same registry verification.
 
@@ -153,6 +163,8 @@ this same registry verification.
 | `SMART_ACCOUNT_WASM_HASH` | Uploaded account code used to deploy each Smart contract |
 | `ED25519_VERIFIER_ID` | Contract verifying account and mandate signatures |
 | `SPENDING_LIMIT_POLICY_ID` | On-chain mandate spending limits |
+| `AGENT_REGISTRY_ID` | Account-scoped on-chain agent identification registry |
+| `AGENT_VERIFIER_ID` | Mandate signature verifier requiring registered agent identification |
 | `SELLER_REGISTRY_ID` | Verified recipient registry |
 | `PAYMENTS_VERIFIED_SMART_POLICY_ID` | Policy requiring verified C-address recipients |
 | `PAYMENTS_REGISTRY_ADMIN_SECRET` | Testnet registry administrator key |
@@ -178,10 +190,11 @@ workspace schema and does not migrate other database layouts.
 | Route | Purpose |
 |---|---|
 | `POST /api/auth/register`, `/api/auth/login`, `/api/auth/logout` | Email/password sessions |
-| `GET /api/workspace` | Visible accounts, mandates and activity |
-| `POST /api/accounts/open` | Open with name and request ID; legacy `type` values remain supported |
+| `GET /api/workspace` | Main account, agents, mandates and activity |
+| `POST /api/agents` | Register an agent on chain with a name and request ID |
+| `POST /api/accounts/open` | Legacy compatibility: returns the existing main account; never opens an additional account |
 | `POST /api/accounts/:id/funding` | Funding with `method: "fiat"` or `"testnet"`, amount and request ID; omitted method defaults to FIAT; returns HTTP 201 after confirmation |
-| `POST /api/mandates` | Create a mandate on an existing source account |
+| `POST /api/mandates` | Create a mandate on the main account; `accountId` is optional for older clients |
 | `POST /api/mandates/:reference/reveal` | Owner-only retrieval of the secret mandate ID for Show mandate |
 | `DELETE /api/mandates/:reference` | Revoke a mandate using its non-secret record reference |
 | `POST /api/payments` | Owner or delegate payment |
@@ -193,7 +206,7 @@ All new funding and payment successes have `settlement: "stellar-testnet"`, a
 Mandate creation and payments require no currency input; explicit non-USD
 requests are rejected. Public Pay requests derive the buyer's account from the mandate.
 Public Pay endpoints require the secret `mandateId` in the JSON body. They do not
-use an owner cookie or a separate Authorization Bearer token. The owner-authenticated
+use an owner cookie or a separate Authorization Bearer token. Agent identification is also required as `agentId`. The owner-authenticated
 creation response is `{ mandate, mandateId }`; its `mandate.reference` is not a
 payment authorization. Secrets are never put in links, receipts or on-chain arguments.
 
@@ -201,7 +214,7 @@ payment authorization. Secrets are never put in links, receipts or on-chain argu
 
 [`packages/langchain`](packages/langchain/README.md) provides a standalone
 LangChain payment agent and direct CLI. Run `pnpm agent:langchain` to type a
-payment prompt containing a mandate ID, seller Smart Account address and USD
+payment prompt containing a mandate ID, agent identification, seller Smart Account address and USD
 amount. The agent uses Google's `gemini-3.8-flash` by default; set `GEMINI_API_KEY`
 and optionally `GEMINI_MODEL` in `.env`. The direct `pnpm pay:langchain` command
 uses explicit arguments and needs no model. Both call `/api/pay` with a stable
@@ -235,6 +248,8 @@ Historical local-demo USD anchor and unified mandate verification receipts are i
 [unified-mandate-verification.json](docs/unified-mandate-verification.json).
 Earlier XLM-only verification receipts are in
 [stellar-account-verification.json](docs/stellar-account-verification.json).
-Verification of payments using only the secret mandate ID is in
+Verification of payments using the previous secret-only payment flow is in
 [secret-mandate-verification.json](docs/secret-mandate-verification.json).
 Funding directly issues demo USD; all new payment settlement uses Stellar testnet only.
+
+Deployed agent-registry and mandate-verifier checks, including a successful identified agent payment and refusal of unknown or foreign account identities, are recorded in [agent-identity-verification.json](docs/agent-identity-verification.json).

@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from "no
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import { formatAmount, toBaseUnits } from "@mandate/shared";
-import type { AccountMandate, Customer, PaymentEntry, PaymentWorkspace, SpendingAccount, SpendingPeriod } from "@mandate/shared";
+import type { AccountAgent, AccountMandate, Customer, PaymentEntry, PaymentWorkspace, SpendingAccount, SpendingPeriod } from "@mandate/shared";
 
 const deriveKey = promisify(scrypt);
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -32,7 +32,7 @@ export function amount(value: unknown): bigint {
   requireThat(units > 0n, 400, "Amount must be greater than zero");
   return units;
 }
-export interface CustomerRecord extends Customer { password: string }
+export interface CustomerRecord extends Customer { password: string; mainAccountId?: string }
 export interface MandateRecord extends Omit<AccountMandate, "reference" | "enforcement"> {
   id: string; mandateIdHash?: string;
   /** Service mandates are retained only as revoked historical records after upgrade. */
@@ -60,6 +60,7 @@ export interface State {
   customers: CustomerRecord[];
   schemaVersion: 1;
   accounts: SpendingAccount[];
+  agents?: AccountAgent[];
   nextSellerId?: number;
   stellarPairs: StellarAccountPair[];
   mandates: MandateRecord[];
@@ -182,6 +183,8 @@ export class WorkspaceStore {
     const state = this.read();
     const customer = this.customer(state, actor);
     const accounts = state.accounts.filter(a => a.ownerId === customer.id);
+    // Keep historical accounts accessible, with the main account first.
+    accounts.sort((a, b) => Number(b.id === customer.mainAccountId) - Number(a.id === customer.mainAccountId));
     const owned = new Set(accounts.map(a => a.id));
     const shared = state.mandates.filter(m => m.recipientType === "person" && m.recipient === customer.email && !owned.has(m.accountId)).map(m => ({
       account: state.accounts.find(a => a.id === m.accountId)!,
@@ -191,6 +194,7 @@ export class WorkspaceStore {
     const sharedIds = new Set(shared.map(s => s.mandate.reference));
     return {
       mode: "stellar-testnet", customer: publicCustomer(customer), accounts,
+      agents: (state.agents ?? []).filter(agent => owned.has(agent.accountId)),
       mandates: state.mandates.filter(m => owned.has(m.accountId)).map(m => this.mandateView(state, m)), shared,
       activity: state.entries.filter(e => e.ownerId === customer.id || (e.mandateId && sharedIds.has(e.mandateId))).map(publicEntry).reverse(),
     };

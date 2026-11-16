@@ -1,7 +1,7 @@
 # Stellar testnet setup
 
 The current app consists of the web dashboard, payments API, shared TypeScript
-helpers and five Rust contracts. All accounts use Smart Accounts on
+helpers and seven Rust contracts. All accounts use Smart Accounts on
 testnet. Both fund and pay with issued demo USD. One mandate flow uses USD
 automatically, and the dashboard exposes only the actual USD token balance.
 
@@ -32,17 +32,19 @@ captured privately and never printed. Re-running preserves configured contract I
 | Contract | Configuration | Purpose |
 |---|---|---|
 | `mandate-account` | `SMART_ACCOUNT_WASM_HASH` | Code for every user's Smart contract |
-| `mandate-ed25519-verifier` | `ED25519_VERIFIER_ID` | Checks owner and delegate signatures |
+| `mandate-ed25519-verifier` | `ED25519_VERIFIER_ID` | Checks owner signatures |
+| `mandate-agent-registry` | `AGENT_REGISTRY_ID` | Account-scoped agent identification attestations |
+| `mandate-agent-verifier` | `AGENT_VERIFIER_ID` | Requires a registered agent ID bound to each mandate payment signature |
 | `mandate-spending-limit-policy` | `SPENDING_LIMIT_POLICY_ID` | Enforces rolling mandate spending limits |
 | `mandate-seller-registry` | `SELLER_REGISTRY_ID` | Administrator attestations for recipient C addresses |
 | `mandate-verified-smart-policy` | `PAYMENTS_VERIFIED_SMART_POLICY_ID` | Rejects unverified recipients and Classic G-address recipients |
 
-Account opening creates a dedicated Classic wallet, activates it through Friendbot,
+Signup automatically creates a dedicated Classic wallet, activates it through Friendbot,
 deploys its Smart contract, installs the USD owner payment rule and attests the C address.
 The private `stellarPairs` mapping is one-to-one. The UI and public account API show
 one account with the contract's C address and live USD balance.
 
-Accounts have one opening flow. In Add funds, choose FIAT for demo USD or Testnet for the automatic Stellar testnet flow. Both use direct demo USD funding, with no private fiat ledger.
+Each user has one main account. Agents are registered separately for identification, without their own funds or spending permissions. In Add funds, choose FIAT for demo USD or Testnet for the automatic Stellar testnet flow. Both use direct demo USD funding, with no private fiat ledger.
 Enter an amount and click Add funds. The service establishes a trustline in the
 mapped Classic wallet, issues the exact requested amount of demo USD into it,
 and forwards the tokens through their Stellar Asset Contract into Smart.
@@ -94,7 +96,7 @@ pnpm test:chain
 The service tests use a fake network and real SQLite storage. The chain check uses
 fresh testnet wallets, actual contracts and Friendbot funds. It checks one-to-one
 mapping, direct demo USD issuance and forwarding for both options, Smart-to-Smart settlement,
-third-party secret mandate IDs, idempotency, unverified-recipient refusal, asset
+third-party secret mandate IDs with on-chain agent identification, idempotency, unverified-recipient refusal, asset
 scoping, USD spending limits and revocation. It also verifies that hidden XLM
 balances cannot be spent with a USD mandate.
 It writes public transaction receipts to a temporary directory without printing keys.

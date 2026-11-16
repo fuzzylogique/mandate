@@ -4,8 +4,8 @@ import { BaseChatModel } from "@langchain/core/language_models/chat_models";
 import { AIMessage, HumanMessage, type BaseMessage } from "@langchain/core/messages";
 import { createPaymentAgent, DEFAULT_AGENT_MODEL } from "./agent.ts";
 
-const details = { mandateId: "mnd_test_secret", sellerId: `C${"A".repeat(55)}`, amount: "0.2", reference: "LangChain payment" };
-const prompt = `Pay ${details.amount} USD to seller ${details.sellerId} using mandate ${details.mandateId}`;
+const details = { agentId: "agt_test_buyer", mandateId: "mnd_test_secret", sellerId: `C${"A".repeat(55)}`, amount: "0.2", reference: "LangChain payment" };
+const prompt = `Pay ${details.amount} USD to seller ${details.sellerId} using mandate ${details.mandateId} and agent identification ${details.agentId}`;
 const pending = { status: "pending", reason: "Awaiting confirmation", txHash: "test-tx" };
 
 class ScriptedModel extends BaseChatModel {
@@ -39,7 +39,7 @@ test("agent executes a model tool call against /api/pay and preserves the API re
   assert.equal(state.messages.at(-1)?.text, "Payment is pending.");
   assert.ok(model.seen[0]!.some(message => message.text === prompt));
   assert.deepEqual(bodies, [{
-    mandateId: details.mandateId, sellerAddress: details.sellerId, sellerName: "Seller",
+    mandateId: details.mandateId, agentId: details.agentId, sellerAddress: details.sellerId, sellerName: "Seller",
     amount: details.amount, reference: details.reference, requestId: "agent-001",
   }]);
   assert.deepEqual(session.paymentResult, pending);

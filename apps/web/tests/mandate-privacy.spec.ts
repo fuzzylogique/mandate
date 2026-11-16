@@ -1,11 +1,12 @@
 import { expect, test, type Page } from "@playwright/test";
 import type { AccountMandate, PaymentNetwork, PaymentWorkspace, SpendingAccount } from "@mandate/shared";
 
+const agentId = "agt_browser_buyer";
 const mandateId = "mnd_browser_test_secret_0123456789abcdefghijklmnop";
 const mandate: AccountMandate = { reference: "owner-record-reference", accountId: "bank", name: "Purchasing", recipientType: "agent", recipient: "Purchaser", limit: "10", spent: "0", period: "day", expiresAt: "2099-12-31T23:59:59Z", status: "active", createdAt: "2026-11-14T12:00:00Z", currency: "USD", enforcement: "on-chain", ruleId: 2, verifiedRecipientsOnly: true };
 const account: SpendingAccount = { id: "bank", ownerId: "owner", name: "Operations", rail: "traditional", type: "traditional", currency: "USD", balance: "100", address: "C_DEMO_SOURCE", verified: true, createdAt: "2026-11-14T12:00:00Z" };
-const network: PaymentNetwork = { id: "stellar:testnet", name: "Stellar testnet", currency: "XLM", rpcUrl: "https://rpc.example", horizonUrl: "https://horizon.example", explorerUrl: "https://explorer.example", tokenContract: "C_TEST_TOKEN", smartAccounts: true, verifiedSmartAccounts: true, mandates: true, faucet: true };
-const workspace: PaymentWorkspace = { mode: "stellar-testnet", network, customer: { id: "owner", name: "Owner", email: "owner@example.com" }, accounts: [account], mandates: [mandate], shared: [], activity: [] };
+const network: PaymentNetwork = { id: "stellar:testnet", name: "Stellar testnet", currency: "XLM", rpcUrl: "https://rpc.example", horizonUrl: "https://horizon.example", explorerUrl: "https://explorer.example", tokenContract: "C_TEST_TOKEN", smartAccounts: true, verifiedSmartAccounts: true, mandates: true, agentVerification: true, faucet: true };
+const workspace: PaymentWorkspace = { mode: "stellar-testnet", network, customer: { id: "owner", name: "Owner", email: "owner@example.com" }, accounts: [account], agents: [], mandates: [mandate], shared: [], activity: [] };
 
 async function mockClipboard(page: Page, fail = false) {
   await page.addInitScript(({ fail }) => {
@@ -66,13 +67,12 @@ for (const type of ["traditional", "stellar"] as const) {
   }
 }
 
-test("dashboard refreshes both USD balances when returning after a payment", async ({ page }) => {
+test("dashboard refreshes the main account balance when returning after a payment", async ({ page }) => {
   await mockWorkspace(page);
   let paid = false;
   await page.route("**/api/workspace", async route => {
     await route.fulfill({ json: { ...workspace, accounts: [
       { ...account, id: "source", type: "stellar", rail: "blockchain", name: "Sender", currency: "USD", balance: paid ? "9.5" : "10" },
-      { ...account, id: "seller", type: "stellar", rail: "blockchain", name: "Seller", currency: "USD", balance: paid ? "0.5" : "0" },
     ] } });
   });
   await page.goto("/");
@@ -81,9 +81,7 @@ test("dashboard refreshes both USD balances when returning after a payment", asy
   // The browser focuses the dashboard again when returning from the Pay tab.
   await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   await expect(page.locator(".balance")).toHaveText("9.5 USD");
-  await expect(page.getByRole("button", { name: /Seller/ })).toContainText("0.5 USD");
-  await page.getByRole("button", { name: /Seller/ }).click();
-  await expect(page.locator(".balance")).toHaveText("0.5 USD");
+  await expect(page.getByRole("region", { name: "Main account", exact: true })).toHaveCount(1);
 });
 
 test("dashboard copies a mandate while masked and clears its field on Hide", async ({ page }) => {
@@ -167,6 +165,7 @@ test("Pay page keeps the ID password-masked through preview, payment and another
     const request = route.request();
     const body = request.postDataJSON() as Record<string, unknown>;
     expect(body.mandateId).toBe(mandateId);
+    expect(body.agentId).toBe(agentId);
     expect(body).not.toHaveProperty("token");
     expect(body).not.toHaveProperty("rail");
     expect(body).not.toHaveProperty("accountId");
@@ -174,7 +173,7 @@ test("Pay page keeps the ID password-masked through preview, payment and another
     expect(request.headers()).not.toHaveProperty("cookie");
     submitted.push(new URL(request.url()).pathname);
     if (request.url().endsWith("/preview")) {
-      await route.fulfill({ json: { mandate: { name: "Purchasing", address: account.address, limit: "10", spent: "0", expiresAt: mandate.expiresAt }, seller: { address: "C_DEMO_SELLER", name: "Seller", verified: true }, currency: "USD", balance: "100", checks: [{ label: "Payment is allowed", passed: true }] } });
+      await route.fulfill({ json: { agent: { id: agentId, name: "Buyer", verified: true }, mandate: { name: "Purchasing", address: account.address, limit: "10", spent: "0", expiresAt: mandate.expiresAt }, seller: { address: "C_DEMO_SELLER", name: "Seller", verified: true }, currency: "USD", balance: "100", checks: [{ label: "Payment is allowed", passed: true }] } });
     } else {
       await route.fulfill({ json: { status: "paid", payment: { id: "receipt", accountId: account.id, source: account.address, destination: "C_DEMO_SELLER", amount: "1", currency: "USD", kind: "payment", mandateReference: mandate.reference, reference: "Invoice", createdAt: "2026-11-14T12:00:00Z", settlement: "stellar-testnet", txHash: "test-tx", explorerUrl: "https://explorer.example/tx/test-tx" } } });
     }
@@ -183,6 +182,7 @@ test("Pay page keeps the ID password-masked through preview, payment and another
   const idField = page.getByLabel("Mandate ID", { exact: true });
   await expect(idField).toHaveAttribute("type", "password");
   await idField.fill(mandateId);
+  await page.getByLabel("Agent identification", { exact: true }).fill(agentId);
   await page.getByLabel("Seller name", { exact: true }).fill("Seller");
   await page.getByLabel("Seller Smart Account address", { exact: true }).fill("C_DEMO_SELLER");
   await page.getByLabel("Amount (USD)", { exact: true }).fill("1");
@@ -221,7 +221,7 @@ test("dashboard exposes only USD and has no currency selector", async ({ page })
 });
 
 for (const type of ["traditional", "stellar"] as const) {
-  test(`${type} Smart Account addresses copy while masked and reset after switching accounts`, async ({ page }) => {
+  test(`${type} Smart Account main account address copies while masked and resets after navigation`, async ({ page }) => {
     await mockWorkspace(page);
     await mockClipboard(page);
     const secondAddress = "C_SECOND_ACCOUNT";
@@ -247,14 +247,14 @@ for (const type of ["traditional", "stellar"] as const) {
     await expect(addressField).toHaveAttribute("type", "password");
     await expect(addressField).not.toHaveValue(account.address!);
     await page.getByRole("button", { name: "Show Smart Account address", exact: true }).click();
-    await page.getByRole("button", { name: /Second USD account/ }).click();
+    await expect(page.getByRole("button", { name: /Second USD account/ })).toHaveCount(0);
+    await page.getByRole("link", { name: "Activity", exact: true }).click();
     await expect(addressField).toHaveAttribute("type", "password");
-    await expect(addressField).not.toHaveValue(secondAddress);
+    await expect(addressField).not.toHaveValue(account.address!);
     await page.getByRole("button", { name: "Copy Smart Account address", exact: true }).click();
     await expect(page.getByRole("status")).toHaveText("Copied to clipboard.");
-    expect(await copiedValues(page)).toEqual([account.address, secondAddress]);
-    await page.getByRole("button", { name: /Operations/ }).click();
-    await expect(addressField).toHaveAttribute("type", "password");
+    expect(await copiedValues(page)).toEqual([account.address]);
+
   });
 }
 
@@ -273,27 +273,50 @@ test("failed clipboard access never reveals a mandate ID", async ({ page }) => {
   expect(await copiedValues(page)).toEqual([]);
 });
 
-test("new account confirmation masks and copies its Smart Account address", async ({ page }) => {
-  await mockWorkspace(page);
-  await mockClipboard(page);
-  await page.route("**/api/accounts/open", async route => {
-    expect(route.request().postDataJSON()).not.toHaveProperty("type");
-    await route.fulfill({ status: 201, json: { account: { ...account, sellerId: 101 } } });
+test("signup leads directly to one main account with mandates and activity", async ({ page }) => {
+  let signedIn = false;
+  let openingRequests = 0;
+  await page.route("**/api/**", async route => {
+    const path = new URL(route.request().url()).pathname;
+    if (path === "/api/network") return route.fulfill({ json: { network } });
+    if (path === "/api/auth/register") {
+      expect(route.request().postDataJSON()).toEqual({ name: "Owner", email: "owner@example.com", password: "a secure owner password" });
+      signedIn = true;
+      return route.fulfill({ status: 201, json: workspace.customer });
+    }
+    if (path === "/api/workspace") return route.fulfill(signedIn ? { json: workspace } : { status: 401, json: { error: "Please sign in" } });
+    if (path === "/api/accounts/open") openingRequests++;
+    return route.fulfill({ status: 404, json: { error: "Unexpected request" } });
   });
-  await page.goto("/accounts/new");
-  await expect(page.getByRole("radio")).toHaveCount(0);
-  await expect(page.getByText(/Traditional account|Stellar account/)).toHaveCount(0);
-  await page.getByLabel("Account name", { exact: true }).fill("Operations");
-  await page.getByRole("button", { name: "Open account", exact: true }).click();
-  const addressField = page.getByLabel("Smart Account address", { exact: true });
-  await expect(page.getByLabel("Seller ID", { exact: true })).toHaveCount(0);
-  await expect(addressField).toHaveAttribute("type", "password");
-  await expect(addressField).not.toHaveValue(account.address!);
-  await page.getByRole("button", { name: "Copy Smart Account address", exact: true }).click();
-  await expect(page.getByRole("status")).toHaveText("Copied to clipboard.");
-  expect(await copiedValues(page)).toEqual([account.address]);
-  await expect(addressField).toHaveAttribute("type", "password");
+  await page.goto("/");
+  await page.getByRole("button", { name: "New here? Create an account", exact: true }).click();
+  await page.getByLabel("Your name", { exact: true }).fill("Owner");
+  await page.getByLabel("Email", { exact: true }).fill("owner@example.com");
+  await page.getByLabel("Password", { exact: true }).fill("a secure owner password");
+  await page.getByRole("button", { name: "Create account", exact: true }).click();
+  const summary = page.getByRole("region", { name: "Main account", exact: true });
+  await expect(summary).toContainText("100 USD");
+  await expect(summary.getByRole("button", { name: "Add funds", exact: true })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Workspace" }).getByRole("link")).toHaveText(["Agents 0", "Mandates 1", "Activity"]);
+  await expect(page.getByRole("heading", { name: "Mandates", exact: true })).toBeVisible();
+  await expect(page.getByLabel("Source account", { exact: true })).toHaveCount(0);
+  await expect(page.getByRole("link", { name: /Open account|Accounts/ })).toHaveCount(0);
+  expect(openingRequests).toBe(0);
+  await page.getByRole("link", { name: "Activity", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Activity", exact: true })).toBeVisible();
+  await expect(summary).toBeVisible();
 });
+
+for (const path of ["/accounts", "/accounts/new"]) {
+  test(`legacy route ${path} shows the main account dashboard`, async ({ page }) => {
+    await mockWorkspace(page);
+    await page.goto(path);
+    await expect(page.getByRole("region", { name: "Main account", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Mandates", exact: true })).toBeVisible();
+    await expect(page.getByLabel("Account name", { exact: true })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "Open account", exact: true })).toHaveCount(0);
+  });
+}
 
 test("seller IDs are entered as numbers and saved with a mandate", async ({ page }) => {
   await mockWorkspace(page);
@@ -302,6 +325,7 @@ test("seller IDs are entered as numbers and saved with a mandate", async ({ page
     requests++;
     const input = route.request().postDataJSON();
     expect(input.sellerIds).toEqual([101, 202, 303]);
+    expect(input).not.toHaveProperty("accountId");
     await route.fulfill({ status: 201, json: { mandate: { ...mandate, reference: "restricted", sellerIds: input.sellerIds }, mandateId } });
   });
   await page.goto("/mandates");
@@ -331,7 +355,35 @@ test("accounts hide internal seller IDs and saved mandate restrictions remain vi
   await page.route("**/api/workspace", route => route.fulfill({ json: { ...workspace, accounts: [{ ...account, sellerId: 101 }], mandates: [{ ...mandate, sellerIds: [202, 303] }] } }));
   await page.goto("/");
   await expect(page.getByLabel("Seller ID", { exact: true })).toHaveCount(0);
-  await expect(page.getByText(/seller ID/i)).toHaveCount(0);
+  await expect(page.getByRole("region", { name: "Main account", exact: true }).getByText(/seller ID/i)).toHaveCount(0);
   await page.goto("/mandates");
   await expect(page.getByText("Allowed seller IDs: 202, 303", { exact: true })).toBeVisible();
+});
+
+test("Agents lists account identities and registers new agents without spending settings", async ({ page }) => {
+  await mockWorkspace(page);
+  await mockClipboard(page);
+  const agent = { id: agentId, accountId: account.id, name: "Travel booker", verified: true, verificationTxHash: "registration", createdAt: "2026-11-15T12:00:00Z", explorerUrl: "https://explorer.example/tx/registration" };
+  let registered = false;
+  await page.route("**/api/workspace", route => route.fulfill({ json: { ...workspace, agents: registered ? [agent] : [] } }));
+  await page.route("**/api/agents", async route => {
+    expect(route.request().postDataJSON()).toMatchObject({ name: "Travel booker" });
+    expect(route.request().postDataJSON()).not.toHaveProperty("limit");
+    registered = true;
+    await route.fulfill({ status: 201, json: agent });
+  });
+  await page.goto("/agents");
+  await expect(page.getByRole("region", { name: "Main account", exact: true })).toBeVisible();
+  await expect(page.getByText("No agents yet. Add an agent to get its identification value.")).toBeVisible();
+  await page.getByRole("button", { name: "Add agent", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Add agent", exact: true });
+  await expect(dialog.getByLabel(/Spending limit|Expires|Rolling window/)).toHaveCount(0);
+  await dialog.getByLabel("Agent name", { exact: true }).fill("Travel booker");
+  await dialog.getByRole("button", { name: "Add agent", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Travel booker", exact: true })).toBeVisible();
+  await expect(page.getByLabel("Agent identification", { exact: true })).toHaveValue(agentId);
+  await expect(page.getByText("Verified on chain", { exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Copy identification", exact: true }).click();
+  expect(await copiedValues(page)).toEqual([agentId]);
 });
