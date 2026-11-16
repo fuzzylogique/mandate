@@ -82,6 +82,7 @@ export class MandateService {
   private catalogCache?: { at: number; stores: CatalogStore[] };
   private trustCache = new Map<string, { at: number; value: boolean }>();
   private spentCache = new Map<string, { at: number; value: bigint }>();
+  private balanceCache = new Map<string, bigint>();
   private running = new Set<string>();
   private usd?: { tokenContract: string; issuer: string };
 
@@ -132,7 +133,14 @@ export class MandateService {
 
   private async accountView(account: SpendingAccount | undefined): Promise<Account> {
     if (!account?.address) return { status: "none", balance: "0", currency: "USD" };
-    const balance = await this.chain.balance(this.chain.wallet(account.id), "USD").catch(() => 0n);
+    // A failed read keeps the last balance we saw, so the apps don't flash $0.
+    let balance: bigint;
+    try {
+      balance = await this.chain.balance(this.chain.wallet(account.id), "USD");
+      this.balanceCache.set(account.id, balance);
+    } catch {
+      balance = this.balanceCache.get(account.id) ?? 0n;
+    }
     return {
       status: "ready",
       address: account.address,
@@ -640,7 +648,7 @@ export class MandateService {
     const items: Activity[] = [];
     const seen = new Set<string>();
     const checks = async (m: MandateRecord | undefined, store: Store) => [
-      ...(m ? [`Signed by ${m.name}'s own key, under rule ${m.ruleId}`, `Within its ${money(m.limit)} a ${PERIOD_WORD[m.period]} limit`] : []),
+      ...(m ? [`Signed by ${m.name} with its own key, under rule ${m.ruleId}`, `Within its ${money(m.limit)} a ${PERIOD_WORD[m.period]} limit`] : []),
       ...(store.trusted ? [`${store.name} is a trusted store${store.domain ? ` (${store.domain})` : ""}`] : []),
       ...(m ? [`Valid until ${new Date(m.expiresAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })}`] : []),
     ];
