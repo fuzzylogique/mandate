@@ -3,6 +3,7 @@ import { ServiceError } from "./store.ts";
 import type { StellarPaymentService } from "./stellar-service.ts";
 import { ChatError, createPaymentChats } from "@mandate/langchain/chat";
 import { AGENT_HEADERS } from "@mandate/shared";
+import { webOrigins } from "./origins.ts";
 
 function sessionToken(req: Request): string {
   const value = req.headers.cookie?.split(";").map(c => c.trim()).find(c => c.startsWith("mandate_session="));
@@ -23,7 +24,7 @@ export function createPaymentApp(service: StellarPaymentService) {
   app.use((req, res, next) => {
     res.setHeader("Cache-Control", "no-store");
     const origin = req.get("origin");
-    if (req.method !== "GET" && origin && origin !== (process.env.WEB_ORIGIN ?? "http://localhost:4020")) {
+    if (req.method !== "GET" && origin && !webOrigins().includes(origin)) {
       res.status(403).json({ error: "Request origin is not allowed" });
       return;
     }
@@ -76,7 +77,7 @@ export function createPaymentApp(service: StellarPaymentService) {
     const owner = actor(req);
     const method = input.method ?? "fiat";
     if (method !== "fiat" && method !== "testnet") throw new ServiceError(400, "Choose FIAT or Testnet funding");
-    res.status(201).json(method === "fiat" ? await service.createFiatCheckout(owner, req.params.id as string, input) : await service.fund(owner, req.params.id as string, input));
+    res.status(201).json(method === "fiat" ? await service.createFiatCheckout(owner, req.params.id as string, { ...input, returnOrigin: req.get("origin") }) : await service.fund(owner, req.params.id as string, input));
   });
   app.get("/api/funding/stripe/:sessionId", async (req, res) => res.json(await service.fiatFundingStatus(actor(req), req.params.sessionId as string)));
   app.post("/api/mandates", async (req, res) => res.status(201).json(await service.grantMandate(actor(req), body(req))));

@@ -1,8 +1,9 @@
 import Stripe from "stripe";
 import { requireThat, ServiceError } from "./store.ts";
+import { webOrigins } from "./origins.ts";
 
 export type StripeSession = Pick<Stripe.Checkout.Session, "id" | "url" | "livemode" | "mode" | "status" | "payment_status" | "currency" | "amount_total" | "metadata" | "client_reference_id">;
-export interface StripeCheckoutInput { id: string; accountId: string; ownerId: string; cents: number; email: string }
+export interface StripeCheckoutInput { id: string; accountId: string; ownerId: string; cents: number; email: string; returnOrigin?: string }
 export interface FiatGateway {
   create(input: StripeCheckoutInput): Promise<StripeSession>;
   retrieve(id: string): Promise<StripeSession>;
@@ -20,7 +21,9 @@ export class StripeSandbox implements FiatGateway {
   }
   async create(input: StripeCheckoutInput): Promise<StripeSession> {
     const client = this.client();
-    const origin = this.env.WEB_ORIGIN ?? "http://localhost:4020";
+    const allowed = webOrigins(this.env);
+    // Send the buyer back to the dashboard they started from, if it is an allowed one.
+    const origin = input.returnOrigin && allowed.includes(input.returnOrigin) ? input.returnOrigin : allowed[0]!;
     let url: URL;
     try { url = new URL(origin); } catch { throw new ServiceError(503, "WEB_ORIGIN must be a valid HTTP(S) origin"); }
     requireThat(["http:", "https:"].includes(url.protocol) && url.origin === origin.replace(/\/$/, ""), 503, "WEB_ORIGIN must be an HTTP(S) origin without a path");

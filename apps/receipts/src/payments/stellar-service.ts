@@ -296,7 +296,7 @@ export class StellarPaymentService {
       return saved;
     });
     const session = funding.sessionId ? await this.stripe.retrieve(funding.sessionId)
-      : await this.stripe.create({ id, accountId: account.id, ownerId: account.ownerId, cents, email: this.customer(actor).email });
+      : await this.stripe.create({ id, accountId: account.id, ownerId: account.ownerId, cents, email: this.customer(actor).email, returnOrigin: typeof body.returnOrigin === "string" ? body.returnOrigin : undefined });
     this.validateFiatSession(session, funding);
     requireThat(session.status === "open" && session.url?.startsWith("https://checkout.stripe.com/"), 409, "This checkout is complete or expired. Check Activity or start a new deposit.");
     this.core.update(state => {
