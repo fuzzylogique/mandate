@@ -10,6 +10,38 @@ recipient, balance and spending limits and settles demo USD on Stellar testnet.
 
 ## Prompt-driven agent
 
+### Chat UI
+
+Set `GEMINI_API_KEY` in the root `.env`, then run `pnpm dev` and open
+`http://localhost:4020/chat`. You can also use the **Chat** link in the dashboard
+or **Chat to pay** on the Pay page. No owner login is needed.
+
+Signup creates a default **Chat agent** registered to the user's main account
+and a **Chat mandate** allowing **1 USD per rolling 24 hours**, expiring after
+30 days. Signed-in chats bind both automatically; prompts only need a seller
+address and amount. The default mandate secret stays on the server, outside
+model prompts. Existing users get the same setup when loading the dashboard,
+signing in, or starting a signed-in chat. Guest chats ask for a mandate ID and agent identification.
+Fund the main account before paying. Revoking the default mandate prevents
+further chat payments; login never renews or replaces revoked or expired access.
+
+Type a payment request or select **Try a payment prompt** and replace its example
+values. Press Enter to send; Shift + Enter adds a line. The agent keeps the
+conversation for follow-up questions and stops after one payment attempt. The
+UI shows the API's actual paid, declined, or pending outcome and its request ID.
+If the connection drops, **Check response** retrieves the response without
+resubmitting the message or payment. Keep the request ID and identical payment
+details for a pending or uncertain payment; the CLI below supports retries via
+`--request-id`.
+
+Messages, including mandate IDs, go to Gemini. IDs starting with `mnd_` are
+masked in the displayed conversation. The API key stays on the server. Chats
+are held in API memory, expire after an hour of inactivity, and are lost when
+the API restarts. Reloading the page clears the UI; save the request ID before
+leaving if a payment is pending or unconfirmed.
+
+### Terminal
+
 The agent uses LangChain's [`createAgent`](https://docs.langchain.com/oss/javascript/langchain/agents)
 with [`ChatGoogle`](https://docs.langchain.com/oss/javascript/integrations/chat/google).
 The default model is [`gemini-3.8-flash`](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash).

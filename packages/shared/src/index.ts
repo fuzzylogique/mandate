@@ -1,4 +1,5 @@
 export type * from "./payments.ts";
+export type * from "./chat.ts";
 
 /** Stellar token amounts use seven decimal places. */
 export const TOKEN_DECIMALS = 7;

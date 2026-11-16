@@ -153,7 +153,8 @@ export interface CreateAccountMandateInput {
   accountId?: string;
   name: string;
   recipientType: "person" | "agent";
-  recipient: string;
+  /** Optional agent user; person mandates still require the recipient email. */
+  recipient?: string;
   limit: string;
   period: SpendingPeriod;
   expiresAt: string;

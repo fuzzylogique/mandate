@@ -1,4 +1,4 @@
-import type { AccountAgent, FiatCheckout, FiatFundingStatus, FundingMethod, MandateCreation, CreateAccountMandateInput, Customer, MandatePaymentInput, MandatePaymentPreview, MandatePaymentResult, PaymentEntry, PaymentNetwork, PaymentWorkspace, SpendingAccount } from "@mandate/shared";
+import type { AccountAgent, FiatCheckout, FiatFundingStatus, FundingMethod, MandateCreation, CreateAccountMandateInput, Customer, MandatePaymentInput, MandatePaymentPreview, MandatePaymentResult, PaymentChatState, PaymentEntry, PaymentNetwork, PaymentWorkspace, SpendingAccount } from "@mandate/shared";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -6,7 +6,7 @@ export class ApiError extends Error {
 async function request<T>(path: string, method = "GET", body?: unknown): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(`/api${path}`, { method, credentials: path === "/pay" || path === "/pay/preview" ? "omit" : "same-origin", headers: { ...(body ? { "content-type": "application/json" } : {}) }, body: body ? JSON.stringify(body) : undefined });
+    response = await fetch(`/api${path}`, { method, credentials: path === "/pay" || path === "/pay/preview" || (path.startsWith("/chat/") && path !== "/chat/sessions") ? "omit" : "same-origin", headers: { ...(body ? { "content-type": "application/json" } : {}) }, body: body ? JSON.stringify(body) : undefined });
   } catch { throw new Error("Can't reach the Mandate service. Start pnpm dev:receipts and try again."); }
   if (!response.ok) {
     const result = await response.json().catch(() => null) as { error?: string } | null;
@@ -15,6 +15,9 @@ async function request<T>(path: string, method = "GET", body?: unknown): Promise
   return (response.status === 204 ? undefined : await response.json()) as T;
 }
 export const api = {
+  openChat: () => request<PaymentChatState>("/chat/sessions", "POST"),
+  chatState: (id: string) => request<PaymentChatState>(`/chat/sessions/${encodeURIComponent(id)}`),
+  sendChat: (id: string, message: string) => request<PaymentChatState>(`/chat/sessions/${encodeURIComponent(id)}/messages`, "POST", { message }),
   createAgent: (input: { name: string; requestId: string }) => request<AccountAgent>("/agents", "POST", input),
   workspace: () => request<PaymentWorkspace>("/workspace"),
   network: () => request<{ mode: PaymentWorkspace["mode"]; network?: PaymentNetwork }>("/network"),

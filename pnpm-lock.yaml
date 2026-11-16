@@ -204,6 +204,9 @@ importers:
 
   apps/receipts:
     dependencies:
+      '@mandate/langchain':
+        specifier: workspace:*
+        version: link:../../packages/langchain
       '@mandate/shared':
         specifier: workspace:*
         version: link:../../packages/shared

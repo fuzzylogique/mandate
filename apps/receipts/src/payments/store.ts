@@ -32,7 +32,7 @@ export function amount(value: unknown): bigint {
   requireThat(units > 0n, 400, "Amount must be greater than zero");
   return units;
 }
-export interface CustomerRecord extends Customer { password: string; mainAccountId?: string }
+export interface CustomerRecord extends Customer { password: string; mainAccountId?: string; defaultChatMandateExpiresAt?: string }
 export interface MandateRecord extends Omit<AccountMandate, "reference" | "enforcement"> {
   id: string; mandateIdHash?: string;
   /** Service mandates are retained only as revoked historical records after upgrade. */
@@ -48,7 +48,7 @@ export function validateMandateInput(body: Record<string, unknown>): Pick<Accoun
   requireThat(Array.isArray(sellerIds) && sellerIds.length <= 100 && sellerIds.every(id => Number.isSafeInteger(id) && id > 0), 400, "Seller IDs must be a list of up to 100 positive whole numbers");
   return {
     name: text(body.name, "Mandate name"), recipientType: body.recipientType,
-    recipient: body.recipientType === "person" ? email(body.recipient) : text(body.recipient, "Agent identifier"),
+    recipient: body.recipientType === "person" ? email(body.recipient) : body.recipient === undefined || body.recipient === "" ? "Any registered agent" : text(body.recipient, "Agent identifier"),
     limit: decimal(amount(body.limit)), period: body.period, expiresAt: new Date(expiry).toISOString(),
     ...(sellerIds.length ? { sellerIds: [...new Set<number>(sellerIds)].sort((a, b) => a - b) } : {}),
   };

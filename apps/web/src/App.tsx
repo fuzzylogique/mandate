@@ -7,6 +7,7 @@ import { NewMandate } from "./NewMandate.tsx";
 import { MandateCard } from "./MandateCard.tsx";
 import { ThemeToggle } from "./ThemeToggle.tsx";
 import { PayPage } from "./PayPage.tsx";
+import { ChatPage } from "./ChatPage.tsx";
 import { SmartAccountAddress } from "./SmartAccountAddress.tsx";
 import { SecretMandateId } from "./SecretMandateId.tsx";
 import { SignIn } from "./SignIn.tsx";
@@ -15,7 +16,8 @@ import { initials, money, formatValue } from "./format.ts";
 import { Logo, PlusIcon } from "./icons.tsx";
 
 export function App() {
-  return window.location.pathname.replace(/\/$/, "") === "/pay" ? <PayPage /> : <WorkspaceApp />;
+  const path = window.location.pathname.replace(/\/$/, "");
+  return path === "/chat" ? <ChatPage /> : path === "/pay" ? <PayPage /> : <WorkspaceApp />;
 }
 
 function WorkspaceApp() {
@@ -75,7 +77,7 @@ function WorkspaceApp() {
   const subtitle = page === "agents" ? "Identify the agents associated with your account." : page === "activity" ? "Follow your account funding and payments."
     : "Give people and agents permission to spend from your main account.";
   return <div className="page payment-page">
-    <header className="glass topbar"><a className="brand" href="/"><Logo />Mandate</a><div className="topbar-side"><a className="button" href="/pay">Pay</a><span className="pill">{network?.name ?? "Connecting…"}</span>{workspace && <><span className="owner"><span className="owner-avatar" aria-hidden="true">{initials(workspace.customer.name)}</span><span className="owner-name">{workspace.customer.name}</span></span><button className="button is-quiet" disabled={busy} onClick={() => void logout()}>Sign out</button></>}<ThemeToggle /></div></header>
+    <header className="glass topbar"><a className="brand" href="/"><Logo />Mandate</a><div className="topbar-side"><a className="button" href="/chat">Chat</a><a className="button" href="/pay">Pay</a><span className="pill">{network?.name ?? "Connecting…"}</span>{workspace && <><span className="owner"><span className="owner-avatar" aria-hidden="true">{initials(workspace.customer.name)}</span><span className="owner-name">{workspace.customer.name}</span></span><button className="button is-quiet" disabled={busy} onClick={() => void logout()}>Sign out</button></>}<ThemeToggle /></div></header>
     {error && <p className="banner is-bad" role="alert">{error} <button className="button is-quiet" onClick={() => void refresh()}>Retry</button></p>}
     {workspace && <StripeFundingReturn onDone={refresh} />}
     {loading ? <p className="loading muted">Loading your workspace…</p> : !workspace ? <SignIn onSignedIn={refresh} /> : <main>
@@ -94,7 +96,7 @@ function WorkspaceApp() {
       {page === "agents" && <Agents agents={workspace.agents} onDone={refresh} />}
       {page === "mandates" && <div className="mandates-layout"><section className="mandates-list-section">{workspace.mandates.length === 0 ? <p className="card empty">No mandates yet. Create one to share spending access to your account.</p> : <ul className="mandate-card-list">{workspace.mandates.map((mandate, index) => {
         const source = workspace.accounts.find(account => account.id === mandate.accountId);
-        return <MandateCard key={mandate.reference} mandate={mandate} tone={index}><p className="muted">Source: {source?.name ?? mandate.accountId}</p><p className="parent-amount">{formatValue(mandate.spent, mandate.currency ?? source?.currency)} / {money(mandate.limit, mandate.currency ?? source?.currency)}</p><p className="muted">Per {mandate.period === "month" ? "30 days" : mandate.period === "week" ? "7 days" : "24 hours"} · expires {new Date(mandate.expiresAt).toLocaleDateString()}</p><p className="muted">Holder: {mandate.recipient}</p><p className="muted">Allowed seller IDs: {mandate.sellerIds?.length ? mandate.sellerIds.join(", ") : "Any verified seller"}</p><div className="account-buttons"><a className="button" href="/pay">Open Pay page ↗</a>{source && <button className="button" onClick={() => setAction({ kind: "fund", account: source })}>Fund source account</button>}</div><SecretMandateId key={mandate.reference} reference={mandate.reference} />{(mandate.status === "active" || mandate.chainRevocationPending) && (confirmRevoke === mandate.reference ? <div className="confirm"><span>Revoke access?</span><button className="button is-danger" disabled={busy} onClick={() => void revoke(mandate.reference)}>Revoke</button><button className="button" disabled={busy} onClick={() => setConfirmRevoke(null)}>Cancel</button></div> : <button className="button is-quiet" onClick={() => setConfirmRevoke(mandate.reference)}>{mandate.chainRevocationPending ? "Retry revocation" : "Revoke mandate"}</button>)}</MandateCard>;
+        return <MandateCard key={mandate.reference} mandate={mandate} tone={index}><p className="muted">Source: {source?.name ?? mandate.accountId}</p><p className="parent-amount">{formatValue(mandate.spent, mandate.currency ?? source?.currency)} / {money(mandate.limit, mandate.currency ?? source?.currency)}</p><p className="muted">Per {mandate.period === "month" ? "30 days" : mandate.period === "week" ? "7 days" : "24 hours"} · expires {new Date(mandate.expiresAt).toLocaleDateString()}</p><p className="muted">Mandate user: {workspace.agents.find(agent => agent.id === mandate.recipient)?.name ?? mandate.recipient}</p><p className="muted">Allowed seller IDs: {mandate.sellerIds?.length ? mandate.sellerIds.join(", ") : "Any verified seller"}</p><div className="account-buttons"><a className="button" href="/pay">Open Pay page ↗</a>{source && <button className="button" onClick={() => setAction({ kind: "fund", account: source })}>Fund source account</button>}</div><SecretMandateId key={mandate.reference} reference={mandate.reference} />{(mandate.status === "active" || mandate.chainRevocationPending) && (confirmRevoke === mandate.reference ? <div className="confirm"><span>Revoke access?</span><button className="button is-danger" disabled={busy} onClick={() => void revoke(mandate.reference)}>Revoke</button><button className="button" disabled={busy} onClick={() => setConfirmRevoke(null)}>Cancel</button></div> : <button className="button is-quiet" onClick={() => setConfirmRevoke(mandate.reference)}>{mandate.chainRevocationPending ? "Retry revocation" : "Revoke mandate"}</button>)}</MandateCard>;
       })}</ul>}
         {workspace.shared.length > 0 && <><h2 className="shared-heading">Shared with you</h2><ul className="mandate-card-list">{workspace.shared.map(({ account, mandate, ownerName }) => <li className="card mandate-card" key={mandate.reference}><h3>{mandate.name}</h3><p className="muted">Allowed seller IDs: {mandate.sellerIds?.length ? mandate.sellerIds.join(", ") : "Any verified seller"}</p><p className="muted">{account.name} · shared by {ownerName}</p><p>{formatValue(mandate.spent, mandate.currency ?? account.currency)} / {money(mandate.limit, mandate.currency ?? account.currency)}</p><button className="button" disabled={mandate.status !== "active" || mandate.currency !== "USD"} onClick={() => setAction({ kind: "pay", account, mandate })}>Make payment</button></li>)}</ul></>}
       </section></div>}
