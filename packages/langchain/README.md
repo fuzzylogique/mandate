@@ -1,12 +1,79 @@
-# LangChain payment tool
+# LangChain payment agent and tool
 
 A standalone TypeScript module using LangChain's [`tool`](https://reference.langchain.com/javascript/langchain-core/tools/tool) API.
-It calls `POST /api/pay` without an owner login or an LLM API key.
+Both the agent and direct tool call `POST /api/pay` without an owner login.
 
 `mandateId` is the secret mandate ID revealed in the dashboard. `sellerId` is
 the seller's verified Smart Account **C address**, copied from their dashboard;
 the API has no separate seller-ID lookup. The server validates the mandate,
 recipient, balance and spending limits and settles demo USD on Stellar testnet.
+
+## Prompt-driven agent
+
+The agent uses LangChain's [`createAgent`](https://docs.langchain.com/oss/javascript/langchain/agents)
+with [`ChatGoogle`](https://docs.langchain.com/oss/javascript/integrations/chat/google).
+The default model is [`gemini-3.8-flash`](https://ai.google.dev/gemini-api/docs/models/gemini-3.8-flash).
+Add your API key to the repository's ignored `.env`:
+
+```dotenv
+GEMINI_API_KEY=your_gemini_api_key
+GEMINI_MODEL=gemini-3.8-flash
+# Optional; defaults to http://localhost:4022
+PAYMENTS_API_URL=http://localhost:4022
+```
+
+With dependencies installed (`pnpm install`) and the payments service running
+(`pnpm dev:receipts`), start the agent from the repository root:
+
+```bash
+pnpm agent:langchain
+```
+
+At `You:`, type a payment request containing all three details:
+
+```text
+Pay 0.2 USD to seller C_REPLACE_WITH_SELLER_SMART_ACCOUNT_ADDRESS using mandate mnd_replace_with_secret
+```
+
+The agent extracts the details, calls the payment tool and prints the API result.
+It asks follow-up questions if details are missing. Type `exit` to quit; the
+session ends after one payment result. Prompts, including the mandate ID, are
+sent to the configured Gemini model. The agent is instructed to omit the secret
+from its replies.
+
+You can also pass a prompt directly and override the model or request ID:
+
+```bash
+pnpm agent:langchain --prompt "Pay 0.2 USD to seller C_REPLACE_WITH_SELLER_SMART_ACCOUNT_ADDRESS using mandate mnd_replace_with_secret"
+pnpm agent:langchain --model "gemini-3.8-flash" --request-id "purchase-001"
+```
+
+The CLI generates and prints a request ID before running the agent. For pending
+or uncertain outcomes, rerun with `--request-id` set to that ID and the **same
+mandate, seller, amount and reference**. Each session permits only one set of
+payment details; repeated tool calls reuse the first attempt without sending
+another request. An omitted reference defaults to `LangChain payment`.
+
+The model comes from `--model`, then `GEMINI_MODEL`, then the default. Unlike the
+direct CLI, the agent takes payment details from your conversation rather than
+`MANDATE_ID`, `SELLER_ID`, `PAYMENT_AMOUNT`, `PAYMENT_REFERENCE`, or
+`PAYMENT_REQUEST_ID`. Use `--request-id` to choose the agent's request ID.
+
+Temporary Gemini errors (including high demand / HTTP 503) trigger up to two
+retries with backoff. These retries apply to model requests; payment submissions
+are still sent at most once per session. If Gemini remains unavailable, the CLI
+reports whether a payment was attempted and prints a command to restart with the
+same request ID. You can choose another model, such as
+[`gemini-3.5-flash-lite`](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite),
+with `--model` or `GEMINI_MODEL`.
+
+For embedding, import `createPaymentAgent` from `@mandate/langchain/agent` and
+invoke `session.agent.invoke({ messages: [{ role: "user", content: prompt }] })`.
+Read `session.paymentResult` for the API outcome and `session.requestId` for retries.
+
+## Direct CLI and tool
+
+The direct CLI does not call a model and needs no Gemini API key.
 
 From the repository root, install dependencies with `pnpm install`, start the
 payment service with `pnpm dev:receipts`, then run:
@@ -50,6 +117,7 @@ const result = await pay.invoke({
 });
 ```
 
-The returned tool can be supplied to a LangChain agent. The mandate ID and seller
-are bound in the factory; the model only supplies amount, reference and request
-ID. Keep the secret mandate ID out of prompts and logs.
+When embedding this direct tool in your own agent, the mandate ID and seller are
+bound in the factory; the model only supplies amount, reference and request ID.
+This lets you keep the secret outside your model's prompts. The prompt-driven
+agent above instead accepts the IDs in the conversation.

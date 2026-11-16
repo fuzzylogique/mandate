@@ -200,10 +200,12 @@ payment authorization. Secrets are never put in links, receipts or on-chain argu
 ## LangChain module
 
 [`packages/langchain`](packages/langchain/README.md) provides a standalone
-LangChain payment tool and CLI example. It reads a secret mandate ID and seller
-Smart Account address, then calls `/api/pay` with an explicit USD amount,
-reference and stable request ID. Run it with `pnpm pay:langchain`; see the module
-README for configuration and import examples.
+LangChain payment agent and direct CLI. Run `pnpm agent:langchain` to type a
+payment prompt containing a mandate ID, seller Smart Account address and USD
+amount. The agent uses Google's `gemini-3.8-flash` by default; set `GEMINI_API_KEY`
+and optionally `GEMINI_MODEL` in `.env`. The direct `pnpm pay:langchain` command
+uses explicit arguments and needs no model. Both call `/api/pay` with a stable
+request ID; see the module README for configuration, retries and import examples.
 
 ## Checks
 

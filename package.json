@@ -15,6 +15,7 @@
     "typecheck": "tsc -p . && pnpm -r typecheck",
     "test": "pnpm --filter @mandate/receipts test && pnpm --filter @mandate/langchain test",
     "pay:langchain": "pnpm --filter @mandate/langchain pay",
+    "agent:langchain": "pnpm --filter @mandate/langchain agent",
     "test:chain": "node --env-file=.env scripts/test-live-payments.ts",
     "test:contracts": "cargo test --manifest-path contracts/Cargo.toml --workspace",
     "build": "pnpm --filter @mandate/web build",
