@@ -1,0 +1,17 @@
+{
+  "name": "@mandate/merchant",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "node --env-file-if-exists=../../.env --watch src/index.ts",
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@mandate/shared": "workspace:*",
+    "@x402/core": "^2.31.0",
+    "@x402/express": "^2.31.0",
+    "@x402/stellar": "^2.31.0",
+    "express": "^5.1.0"
+  },
+  "devDependencies": { "@types/express": "^5.0.0", "@types/node": "^24.0.0", "typescript": "^5.9.0" }
+}

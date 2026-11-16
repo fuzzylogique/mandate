@@ -75,13 +75,43 @@ Payments back to the source account are rejected.
 
 ## Agents and on-chain identification
 
-The **Agents** tab lists the agents associated with your main account. **Add agent** registers a name and a stable public identification value (`agt_…`). Agents have no balance or spending limits of their own. Any agent registered to an account can use any of that account's mandates.
+The **Agents** tab lists the agents associated with your main account. **Add agent** offers two kinds:
+
+- **With its own key** (default): for Claude over MCP, LangChain agents and scripts. The agent connects with a one-time code and keeps its own key; see [Agents with their own key](#agents-with-their-own-key-mcp-langchain-x402).
+- **With a mandate ID**: registers a name and a stable public identification value (`agt_…`) right away. It pays on the Pay page or in chat with a secret mandate ID that the service signs for. Any agent of this kind can use any of the account's secret-ID mandates.
+
+Agents have no balance or spending limits of their own. **Remove agent** deletes its registry entry on chain and revokes every mandate it holds.
 
 The service attests `(Smart Account C address, agent ID)` in an administrator-controlled agent registry, following the seller-verification pattern. Registrations appear only after chain confirmation, and the dashboard checks their current on-chain status. Agent names are display labels; the registry entry determines membership. Identification is public and is not a separate bearer secret or proof of legal identity.
 
 Payments require both the secret `mandateId` and the registered `agentId`. The mandate verifier checks the on-chain registry during Smart Account authorization. The mandate signature binds the agent ID to the account, rule and payment digest, and emits an on-chain agent authorization event. Foreign, missing, unknown or revoked identities cannot authorize a mandate payment. The API records `agentId` in activity and receipts. Existing mandate rules are upgraded before payment by replacing the old signer with the agent-aware verifier; their limits and spending history remain intact.
 
 Run `pnpm setup:contracts` for an existing checkout to deploy the agent registry and verifier and save their IDs. Existing agents are never inferred from mandate-holder names.
+
+## Agents with their own key (MCP, LangChain, x402)
+
+An agent that holds its own key can pay only under the mandates you give it, and Mandate cannot pay as it. There are no approval requests: an agent cannot ask for more, and nothing it does can raise a limit or add a seller.
+
+1. **Agents → Add agent → With its own key.** The dashboard shows a one-time code (like `K7Q4-92XD`, valid 30 minutes, usable once). Nothing is registered yet.
+2. **Connect the agent.** For Claude Code: `claude mcp add mandate -- node apps/agent/src/mcp.ts`, then ask it to "connect to Mandate with code K7Q4-92XD". The agent creates an ed25519 key in `~/.mandate/agent.json` (mode 600) and signs the connect request with it. Mandate then registers `(account, agent ID) → public key` in the on-chain agent registry. From then on, the registry accepts only that key for this agent.
+3. **Mandates → New mandate**, and choose the agent as **Mandate user**. Its key becomes the rule's **only signer**: there is no secret mandate ID, Mandate holds no key for it, and the Pay page and `/api/payments` refuse it. The seller ID list is resolved to addresses and written into the rule on chain, so every listed ID must already belong to a Mandate account.
+4. **The agent pays.** Each request to Mandate is signed with its key (`x-mandate-agent`, `x-mandate-time`, `x-mandate-signature` over method, path, time and body hash; signatures expire after 5 minutes).
+   - **Direct payment** (`pay_seller`): Mandate checks the seller, limit, list, balance and expiry, then builds the transfer and returns the unsigned authorization. The agent decodes it and refuses to sign anything except `transfer(account, seller, amount)` on the USD token. It signs and returns it, and Mandate submits it and pays the network fee.
+   - **x402** (`find_products`, `buy`): the agent pays a store directly, signing the x402 payment itself, and the store's facilitator submits it. Mandate then records the purchase only after reading the confirmed transfer from chain: from this account, in USD, to a verified seller.
+
+Every payment is checked again by the owner's smart account on Stellar, whether or not it went through Mandate: the agent verifier (signature, plus the registered key for this agent), the spending-limit policy, and the verified-seller policy (verified C address, and the mandate's seller list if it has one). So an agent that skips Mandate, uses x402, or tries another key still cannot overspend, pay an unverified or unlisted seller, or pay after you remove it. `pnpm test:agents` proves each of these on testnet.
+
+The same agent works three ways, all from [`apps/agent`](apps/agent):
+
+| Use | How |
+|---|---|
+| MCP (Claude and other assistants) | `claude mcp add mandate -- node apps/agent/src/mcp.ts` — tools `connect_to_mandate`, `check_mandates`, `check_seller`, `pay_seller`, `find_products`, `buy` |
+| LangChain | `import { createMandateTools } from "@mandate/agent/langchain"` — the same tools as LangChain tools |
+| Command line | `pnpm agent connect <code>`, `mandates`, `seller <address>`, `pay <seller> <amount> [reference]`, `find <words>`, `buy <url>` |
+
+Set `MANDATE_API_URL` (default `http://localhost:4022`) and `MANDATE_AGENT_FILE` to change where the agent connects and keeps its key.
+
+**x402 demo.** `pnpm setup:stores` (with `pnpm dev` running) opens two store accounts in Mandate, FreshMart and GreenLeaf Market, so their smart accounts are verified sellers. It also picks an unregistered look-alike address (FreshMarrt) and funds a facilitator key. `pnpm dev` then also serves the stores on port 4021 (`/catalog` is free; each item is paid over x402 to the store's C address) and Mandate's facilitator on 4023. The facilitator is the stock x402 Stellar facilitator, with a higher fee ceiling and with events from the spending-limit policy, seller policy and agent verifier ignored. Hosted facilitators reject smart-account payments for those two reasons.
 
 ## Stripe sandbox setup
 
@@ -116,7 +146,8 @@ Revocation disables the secret ID immediately; pending on-chain revocation remai
 visible and retryable until the rule is removed.
 
 Each account has a stable numeric seller ID kept internally and assigned
-automatically to existing accounts. A mandate accepts up to 100 positive whole-number
+automatically to existing accounts. (For a mandate held by an agent with its own key,
+the list is enforced on chain instead; see above.) A mandate accepts up to 100 positive whole-number
 seller IDs; duplicates are removed. An empty list allows any verified seller.
 Creation validates only the list format, so sellers need not exist or be verified yet.
 At payment preview and submission, the service matches the actual destination address
@@ -189,6 +220,9 @@ this same registry verification.
 | `STRIPE_SECRET_KEY` | Stripe sandbox/test secret key (`sk_test_...`); live keys are rejected |
 | `STRIPE_WEBHOOK_SECRET` | Stripe webhook signing secret (`whsec_...`) for `/api/stripe/webhook` |
 | `RECEIPTS_PORT` | Payments API port; defaults to `4022` |
+| `STORES_URL` | x402 demo stores that connected agents can browse; defaults to `http://localhost:4021` |
+| `MERCHANT_PORT`, `FACILITATOR_PORT`, `FACILITATOR_URL` | Ports for the demo stores and facilitator |
+| `MERCHANT_ASSET`, `STORE_*_ADDRESS`, `STORE_*_PASSWORD`, `FACILITATOR_SECRET` | Written by `setup:stores`: the USD token, store accounts (test logins for the demo), the look-alike address and the facilitator's fee-paying key |
 | `NODE_ENV` | Set to `production` for Secure session cookies; requires HTTPS |
 
 Signing keys, secret mandate IDs and cached command responses are encrypted with
@@ -209,7 +243,13 @@ workspace schema and does not migrate other database layouts.
 |---|---|
 | `POST /api/auth/register`, `/api/auth/login`, `/api/auth/logout` | Email/password sessions |
 | `GET /api/workspace` | Main account, agents, mandates and activity |
-| `POST /api/agents` | Register an agent on chain with a name and request ID |
+| `POST /api/agents` | Register an agent on chain with a name and request ID; with `connect: true`, add an agent that will bring its own key and return its one-time code |
+| `POST /api/agents/:id/pairing` | New one-time code for an agent still waiting to connect |
+| `DELETE /api/agents/:id` | Remove an agent from the registry and revoke its mandates |
+| `POST /api/agent/connect` | Agent-signed: redeem the code and register the agent's key on chain |
+| `GET /api/agent/me`, `/api/agent/mandates`, `/api/agent/sellers/:address` | Agent-signed: connection details, its mandates, seller verification |
+| `POST /api/agent/payments/prepare`, `/api/agent/payments/submit` | Agent-signed: build a transfer for the agent to sign, then submit it |
+| `POST /api/agent/x402` | Agent-signed: record an x402 purchase after reading it from chain |
 | `POST /api/accounts/open` | Legacy compatibility: returns the existing main account; never opens an additional account |
 | `POST /api/accounts/:id/funding` | Funding with amount and request ID; `method: "fiat"` (default) returns HTTP 201 with `{ status: "checkout", provider: "stripe", mode: "test", sessionId, url }`; `"testnet"` returns HTTP 201 with a confirmed funding receipt |
 | `GET /api/funding/stripe/:sessionId` | Owner-authenticated Stripe confirmation; returns `paid` with a funding receipt, `pending`, or `expired` |
@@ -280,6 +320,15 @@ payments, mandate limits and revocation with fresh wallets and testnet funds:
 pnpm test:chain
 ```
 
+To verify agents with their own key on testnet, with `pnpm dev` running and after `pnpm setup:stores`
+(it starts the stores and facilitator itself if they are not running):
+
+```bash
+pnpm test:agents
+```
+
+It connects an agent with a code, pays a store directly and over x402, and checks refusals: an allowed-but-unlisted seller, a look-alike, over the limit, another key posing as the agent, and a removed agent. The x402 refusals and both attempts that skip Mandate are refused by the account on chain. Receipts are in [agent-key-verification.json](docs/agent-key-verification.json).
+
 Historical local-demo USD anchor and unified mandate verification receipts are in
 [unified-mandate-verification.json](docs/unified-mandate-verification.json).
 Earlier XLM-only verification receipts are in
@@ -295,4 +344,4 @@ Deployed agent-registry and mandate-verifier checks, including a successful iden
 
 The native app from `main` lives in `apps/ios/Mandate.xcodeproj` and uses the same Mandate terminology as the web dashboard. Open it in Xcode with the iOS SDK required by the project, start `pnpm dev`, and run it in the iPhone simulator. Sign in with your workspace email and password; the default API address is `http://localhost:4022`. The app reads `/api/workspace`, creates mandates and revokes them by their record reference. It uses session cookies and converts USD amounts for the native views.
 
-Mandate payments require both the secret mandate ID and an on-chain registered agent identification; use the web Pay page or the LangChain client. The native detail sheet can reveal the mandate ID after owner sign-in. Native build verification requires macOS and Xcode.
+The app's Agents screen adds agents with their own key (showing the one-time code), lists their status and removes them. Mandates for such agents show that only the agent's key can sign. Secret-ID mandate payments require both the secret mandate ID and an on-chain registered agent identification; use the web Pay page or the LangChain client. The native detail sheet can reveal the mandate ID after owner sign-in. Native build verification requires macOS and Xcode.

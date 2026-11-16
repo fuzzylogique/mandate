@@ -8,7 +8,7 @@ import {
   buildAuthorizationEntryPreimage,
   hash,
   xdr,
-  type Keypair,
+  Keypair,
 } from "@stellar/stellar-sdk";
 
 export interface SmartAccountSigner {
@@ -34,12 +34,18 @@ export function externalSigner(verifier: string, keypair: Keypair): xdr.ScVal {
   ]);
 }
 
-export function agentSigner(verifier: string, keypair: Keypair, account: string): xdr.ScVal {
-  const key = xdr.ScVal.scvMap([
+/**
+ * A rule signer for an agent: the agent verifier plus (account, agent public key).
+ * `key` is the agent's keypair, or just its public key (G-address) when the
+ * agent holds the secret itself.
+ */
+export function agentSigner(verifier: string, key: Keypair | string, account: string): xdr.ScVal {
+  const publicKey = typeof key === "string" ? Keypair.fromPublicKey(key).rawPublicKey() : key.rawPublicKey();
+  const keyData = xdr.ScVal.scvMap([
     mapEntry("account", Address.fromString(account).toScVal()),
-    mapEntry("public_key", xdr.ScVal.scvBytes(keypair.rawPublicKey())),
+    mapEntry("public_key", xdr.ScVal.scvBytes(publicKey)),
   ]);
-  return xdr.ScVal.scvVec([symbol("External"), Address.fromString(verifier).toScVal(), xdr.ScVal.scvBytes(key.toXDR())]);
+  return xdr.ScVal.scvVec([symbol("External"), Address.fromString(verifier).toScVal(), xdr.ScVal.scvBytes(keyData.toXDR())]);
 }
 
 /** Address credentials of an auth entry, for both credential versions. */

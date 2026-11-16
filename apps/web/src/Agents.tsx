@@ -2,20 +2,50 @@ import { useState, type FormEvent } from "react";
 import type { AccountAgent } from "@mandate/shared";
 import { api } from "./api.ts";
 import { initials } from "./format.ts";
+import { ConnectSteps } from "./ConnectSteps.tsx";
 import { Dialog } from "./Dialog.tsx";
 import { PlusIcon } from "./icons.tsx";
+
+const shortKey = (key: string) => `${key.slice(0, 6)}…${key.slice(-6)}`;
 
 export function Agents({ agents, onDone }: { agents: AccountAgent[]; onDone: () => Promise<void> }) {
   const [creating, setCreating] = useState(false);
   return <section className="agents-section">
-    <div className="section-header"><p className="muted">Agents identify who is paying. Any registered agent can use a mandate from this account.</p><button className="button is-primary" onClick={() => setCreating(true)}><PlusIcon /> Add agent</button></div>
-    {agents.length === 0 ? <p className="card empty">No agents yet. Add an agent to get its identification value.</p> : <ul className="agent-grid">{agents.map(agent => <li className="card agent-card" key={agent.id}>
-      <div className="agent-heading"><span className="account-letter" aria-hidden="true">{initials(agent.name)}</span><div><h2>{agent.name}</h2><span className={agent.verified ? "verified" : "form-error"}>{agent.verified ? "Verified on chain" : "Not verified on chain"}</span></div></div>
-      <AgentIdentity agent={agent} />
-      {agent.explorerUrl && <a className="transaction-link" href={agent.explorerUrl} target="_blank" rel="noreferrer">View registration on Stellar ↗</a>}
-    </li>)}</ul>}
+    <div className="section-header agents-actions"><button className="button is-primary" onClick={() => setCreating(true)}><PlusIcon /> Add agent</button></div>
+    {agents.length === 0 ? <p className="card empty">No agents yet. Add one to connect an assistant like Claude.</p> : <ul className="agent-grid">{agents.map(agent => <AgentCard key={agent.id} agent={agent} onDone={onDone} />)}</ul>}
     {creating && <NewAgent onDone={onDone} onClose={() => setCreating(false)} />}
   </section>;
+}
+
+function status(agent: AccountAgent): { label: string; tone: "verified" | "muted" | "form-error" } {
+  if (agent.status === "waiting") return { label: "Waiting to connect", tone: "muted" };
+  if (agent.status === "revoked") return { label: "Removed", tone: "form-error" };
+  if (agent.status === "connected") return agent.verified ? { label: "Connected · own key, verified on chain", tone: "verified" } : { label: "Connected · not yet confirmed on chain", tone: "muted" };
+  return agent.verified ? { label: "Verified on chain", tone: "verified" } : { label: "Not verified on chain", tone: "form-error" };
+}
+
+function AgentCard({ agent, onDone }: { agent: AccountAgent; onDone: () => Promise<void> }) {
+  const [busy, setBusy] = useState(false);
+  const [confirming, setConfirming] = useState(false);
+  const [error, setError] = useState("");
+  const run = async (work: () => Promise<unknown>, failure: string) => {
+    setBusy(true); setError("");
+    try { await work(); await onDone(); setConfirming(false); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : failure); }
+    finally { setBusy(false); }
+  };
+  const { label, tone } = status(agent);
+  return <li className="card agent-card">
+    <div className="agent-heading"><span className="account-letter" aria-hidden="true">{initials(agent.name)}</span><div><h2>{agent.name}</h2><span className={tone}>{label}</span></div></div>
+    {agent.status === "waiting" && <ConnectSteps agent={agent} busy={busy} onNewCode={() => void run(() => api.newPairingCode(agent.id), "Could not make a new code")} />}
+    {agent.status === "connected" && agent.publicKey && <p className="muted">Signs with its own key <code title={agent.publicKey}>{shortKey(agent.publicKey)}</code>. Mandate cannot sign for it.</p>}
+    {agent.status === undefined && <AgentIdentity agent={agent} />}
+    {agent.explorerUrl && agent.status !== "revoked" && <a className="transaction-link" href={agent.explorerUrl} target="_blank" rel="noreferrer">View registration on Stellar ↗</a>}
+    {agent.status !== undefined && agent.status !== "revoked" && (confirming
+      ? <div className="confirm"><span>Remove {agent.name}? Its mandates are revoked too.</span><button className="button is-danger" disabled={busy} onClick={() => void run(() => api.removeAgent(agent.id), "Could not remove the agent")}>{busy ? "Removing…" : "Remove"}</button><button className="button" disabled={busy} onClick={() => setConfirming(false)}>Cancel</button></div>
+      : <button className="button is-quiet agent-remove" onClick={() => setConfirming(true)}>Remove agent</button>)}
+    {error && <p role="alert" className="form-error">{error}</p>}
+  </li>;
 }
 
 function AgentIdentity({ agent }: { agent: AccountAgent }) {
@@ -31,19 +61,30 @@ function AgentIdentity({ agent }: { agent: AccountAgent }) {
 
 function NewAgent({ onDone, onClose }: { onDone: () => Promise<void>; onClose: () => void }) {
   const [name, setName] = useState("");
+  const [ownKey, setOwnKey] = useState(true);
   const [requestId, setRequestId] = useState(() => crypto.randomUUID());
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+  const [added, setAdded] = useState<AccountAgent | null>(null);
   const submit = async (event: FormEvent) => {
     event.preventDefault(); setBusy(true); setError("");
-    try { await api.createAgent({ name, requestId }); await onDone(); onClose(); }
-    catch (cause) { setError(cause instanceof Error ? cause.message : "Could not register the agent"); }
+    try {
+      const agent = await api.createAgent({ name, requestId, ...(ownKey ? { connect: true } : {}) });
+      await onDone();
+      if (ownKey) setAdded(agent); else onClose();
+    }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Could not add the agent"); }
     finally { setBusy(false); }
   };
+  if (added) return <Dialog title={`Connect ${added.name}`} onClose={onClose}><div className="form"><ConnectSteps agent={added} busy={false} onNewCode={onClose} /><div className="form-actions"><button className="button is-primary" type="button" onClick={onClose}>Done</button></div></div></Dialog>;
   return <Dialog title="Add agent" onClose={() => { if (!busy) onClose(); }}><form className="form" onSubmit={event => void submit(event)}>
-    <label className="field">Agent name<input required autoFocus maxLength={120} disabled={busy} value={name} onChange={event => { setName(event.target.value); setRequestId(crypto.randomUUID()); }} placeholder="Travel booker" /></label>
-    <p className="muted">An identification value will be registered to your account on chain. Give the agent this value and a mandate ID when it needs to pay.</p>
+    <label className="field">Agent name<input required autoFocus maxLength={120} disabled={busy} value={name} onChange={event => { setName(event.target.value); setRequestId(crypto.randomUUID()); }} /></label>
+    <fieldset className="choice-group" disabled={busy}>
+      <legend>How it pays</legend>
+      <label className="choice"><input type="radio" name="agent-kind" checked={ownKey} onChange={() => { setOwnKey(true); setRequestId(crypto.randomUUID()); }} /><span><strong>With its own key</strong><small className="muted">For Claude (MCP), LangChain or scripts. It connects with a one-time code and signs every payment itself.</small></span></label>
+      <label className="choice"><input type="radio" name="agent-kind" checked={!ownKey} onChange={() => { setOwnKey(false); setRequestId(crypto.randomUUID()); }} /><span><strong>With a mandate ID</strong><small className="muted">For the Pay page and chat. Mandate holds the key; the agent shows its identification and a secret mandate ID.</small></span></label>
+    </fieldset>
     {error && <p className="form-error" role="alert">{error}</p>}
-    <div className="form-actions"><button className="button" type="button" disabled={busy} onClick={onClose}>Cancel</button><button className="button is-primary" disabled={busy}>{busy ? "Registering on Stellar…" : "Add agent"}</button></div>
+    <div className="form-actions"><button className="button" type="button" disabled={busy} onClick={onClose}>Cancel</button><button className="button is-primary" disabled={busy}>{busy ? (ownKey ? "Adding…" : "Registering on Stellar…") : "Add agent"}</button></div>
   </form></Dialog>;
 }

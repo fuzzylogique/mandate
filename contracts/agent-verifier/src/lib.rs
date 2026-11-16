@@ -9,7 +9,7 @@ use soroban_sdk::{
 use stellar_accounts::verifiers::{ed25519, Verifier};
 #[contractclient(name = "RegistryClient")]
 pub trait Registry {
-    fn is_verified(e: Env, account: Address, agent_id: String) -> bool;
+    fn is_agent_key(e: Env, account: Address, agent_id: String, public_key: BytesN<32>) -> bool;
 }
 #[contracttype]
 #[derive(Clone)]
@@ -59,7 +59,9 @@ impl Verifier for AgentVerifier {
     fn verify(e: &Env, payload: Bytes, key_data: Bytes, sig_data: Bytes) -> bool {
         let key = AgentKey::from_xdr(e, &key_data).unwrap();
         let sig = AgentSignature::from_xdr(e, &sig_data).unwrap();
-        if !RegistryClient::new(e, &Self::registry(e)).is_verified(&key.account, &sig.agent_id) {
+        // The agent must be registered to this account, and if it registered its
+        // own key, this signature must come from that key.
+        if !RegistryClient::new(e, &Self::registry(e)).is_agent_key(&key.account, &sig.agent_id, &key.public_key) {
             return false;
         }
         let digest = e
@@ -106,8 +108,18 @@ mod test {
         pub fn revoke(e: Env, account: Address, agent_id: String) {
             e.storage().persistent().remove(&(account, agent_id));
         }
-        pub fn is_verified(e: Env, account: Address, agent_id: String) -> bool {
-            e.storage().persistent().has(&(account, agent_id))
+        pub fn bind(e: Env, account: Address, agent_id: String, public_key: BytesN<32>) {
+            e.storage().persistent().set(&(account.clone(), agent_id.clone()), &true);
+            e.storage().persistent().set(&(account, agent_id, true), &public_key);
+        }
+        pub fn is_agent_key(e: Env, account: Address, agent_id: String, public_key: BytesN<32>) -> bool {
+            if !e.storage().persistent().has(&(account.clone(), agent_id.clone())) {
+                return false;
+            }
+            match e.storage().persistent().get::<_, BytesN<32>>(&(account, agent_id, true)) {
+                Some(bound) => bound == public_key,
+                None => true,
+            }
         }
     }
     #[test]
@@ -162,5 +174,34 @@ mod test {
             .is_err());
         registry_client.revoke(&account, &buyer);
         assert!(!client.verify(&payload, &key, &signed.to_xdr(&e)));
+    }
+    #[test]
+    fn an_agent_with_its_own_key_cannot_be_claimed_by_another_key() {
+        let e = Env::default();
+        e.mock_all_auths();
+        let registry = e.register(TestRegistry, ());
+        let verifier = e.register(AgentVerifier, (registry.clone(),));
+        let account = Address::generate(&e);
+        let payload = Bytes::from_array(&e, &[9; 32]);
+        let agent = String::from_str(&e, "agt_claude");
+        let own = SigningKey::from_bytes(&[3; 32]);
+        let service = SigningKey::from_bytes(&[4; 32]);
+        let key_of = |signing: &SigningKey| AgentKey {
+            account: account.clone(),
+            public_key: BytesN::from_array(&e, &signing.verifying_key().to_bytes()),
+        }
+        .to_xdr(&e);
+        let sign = |signing: &SigningKey| {
+            let digest = e
+                .crypto()
+                .sha256(&AgentDigest { agent_id: agent.clone(), payload: payload.clone() }.to_xdr(&e))
+                .to_array();
+            AgentSignature { agent_id: agent.clone(), signature: BytesN::from_array(&e, &signing.sign(&digest).to_bytes()) }.to_xdr(&e)
+        };
+        TestRegistryClient::new(&e, &registry).bind(&account, &agent, &BytesN::from_array(&e, &own.verifying_key().to_bytes()));
+        let client = AgentVerifierClient::new(&e, &verifier);
+        assert!(client.verify(&payload, &key_of(&own), &sign(&own)));
+        // A different key (for example one the service holds) cannot sign as this agent.
+        assert!(!client.verify(&payload, &key_of(&service), &sign(&service)));
     }
 }

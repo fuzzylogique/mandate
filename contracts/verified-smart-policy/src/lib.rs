@@ -6,6 +6,10 @@
 //! All policies on a rule must pass, so a payment goes through only if the
 //! recipient is verified AND the amount fits the limit.
 //!
+//! A mandate may also name the only sellers it can pay. Then a verified
+//! seller outside that list is rejected too, so an agent that holds its own
+//! key cannot reach other sellers by going around the Mandate service.
+//!
 //! On success it emits `PaymentAuthorized`, the on-chain anchor that the
 //! receipt service turns into a receipt.
 #![no_std]
@@ -35,12 +39,14 @@ pub trait SellerRegistryInterface {
 #[derive(Clone, Debug, PartialEq)]
 pub struct VerifiedSmartParams {
     pub registry: Address,
+    /// If set, the only sellers this rule can pay (each must still be verified).
+    pub sellers: Option<Vec<Address>>,
 }
 
 #[contracttype]
 #[derive(Clone)]
 pub enum DataKey {
-    /// (smart account, context rule id) -> registry address
+    /// (smart account, context rule id) -> install parameters
     Registry(Address, u32),
 }
 
@@ -59,6 +65,8 @@ pub enum VerifiedSmartError {
     /// The recipient is not in the seller registry.
     SellerNotVerified = 5,
     OnlySmartAccountsAllowed = 6,
+    /// The recipient is verified but not one of this rule's allowed sellers.
+    SellerNotAllowed = 7,
 }
 
 #[contractevent]
@@ -94,8 +102,8 @@ impl Policy for VerifiedSmartPolicy {
         }
 
         let key = DataKey::Registry(smart_account.clone(), context_rule.id);
-        let registry: Address = match e.storage().persistent().get(&key) {
-            Some(registry) => registry,
+        let params: VerifiedSmartParams = match e.storage().persistent().get(&key) {
+            Some(params) => params,
             None => panic_with_error!(e, VerifiedSmartError::NotInstalled),
         };
         e.storage().persistent().extend_ttl(&key, TTL_THRESHOLD, TTL_EXTEND_TO);
@@ -120,8 +128,14 @@ impl Policy for VerifiedSmartPolicy {
             panic_with_error!(e, VerifiedSmartError::OnlySmartAccountsAllowed)
         }
 
-        if !SellerRegistryClient::new(e, &registry).is_verified(&seller) {
+        if !SellerRegistryClient::new(e, &params.registry).is_verified(&seller) {
             panic_with_error!(e, VerifiedSmartError::SellerNotVerified)
+        }
+
+        if let Some(sellers) = &params.sellers {
+            if !sellers.contains(&seller) {
+                panic_with_error!(e, VerifiedSmartError::SellerNotAllowed)
+            }
         }
 
         PaymentAuthorized {
@@ -150,7 +164,7 @@ impl Policy for VerifiedSmartPolicy {
         if e.storage().persistent().has(&key) {
             panic_with_error!(e, VerifiedSmartError::AlreadyInstalled)
         }
-        e.storage().persistent().set(&key, &install_params.registry);
+        e.storage().persistent().set(&key, &install_params);
     }
 
     fn uninstall(e: &Env, context_rule: ContextRule, smart_account: Address) {
@@ -194,7 +208,9 @@ mod test {
         signers: Vec<Signer>,
     }
 
-    fn setup() -> Setup {
+    fn setup() -> Setup { setup_with(|_| None) }
+
+    fn setup_with(sellers: impl FnOnce(&Env) -> Option<Vec<Address>>) -> Setup {
         let e = Env::default();
         e.mock_all_auths();
         let policy = e.register(VerifiedSmartPolicy, ());
@@ -213,7 +229,7 @@ mod test {
         };
         let signers = vec![&e, Signer::Delegated(Address::generate(&e))];
         VerifiedSmartPolicyClient::new(&e, &policy).install(
-            &VerifiedSmartParams { registry: registry.clone() },
+            &VerifiedSmartParams { registry: registry.clone(), sellers: sellers(&e) },
             &rule,
             &account,
         );
@@ -294,6 +310,26 @@ mod test {
             &s.rule,
             &s.account,
         );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_verified_seller_outside_the_allowed_list() {
+        let mut allowed = None;
+        let s = setup_with(|e| {
+            let seller = Address::generate(e);
+            allowed = Some(seller.clone());
+            Some(vec![e, seller])
+        });
+        let allowed = allowed.unwrap();
+        let other = Address::generate(&s.e);
+        let registry = MockRegistryClient::new(&s.e, &s.registry);
+        registry.allow(&allowed);
+        registry.allow(&other);
+        let client = VerifiedSmartPolicyClient::new(&s.e, &s.policy);
+
+        client.enforce(&call(&s, "transfer", &allowed, 100), &s.signers, &s.rule, &s.account);
+        let result = client.try_enforce(&call(&s, "transfer", &other, 100), &s.signers, &s.rule, &s.account);
         assert!(result.is_err());
     }
 }

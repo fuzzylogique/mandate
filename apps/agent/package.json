@@ -1,0 +1,31 @@
+{
+  "name": "@mandate/agent",
+  "private": true,
+  "type": "module",
+  "description": "An agent that holds its own key and pays within its owner's Mandate, over MCP, LangChain or the command line.",
+  "scripts": {
+    "start": "node --env-file-if-exists=../../.env src/index.ts",
+    "mcp": "node src/mcp.ts",
+    "test": "node --test src/*.test.ts",
+    "typecheck": "tsc -p ."
+  },
+  "dependencies": {
+    "@langchain/core": "^1.4.1",
+    "@mandate/shared": "workspace:*",
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "@stellar/stellar-sdk": "^16.4.1",
+    "@x402/core": "^2.31.0",
+    "@x402/fetch": "^2.31.0",
+    "@x402/stellar": "^2.31.0",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  },
+  "exports": {
+    "./client": "./src/client.ts",
+    "./langchain": "./src/langchain.ts",
+    "./purchase": "./src/purchase.ts"
+  }
+}

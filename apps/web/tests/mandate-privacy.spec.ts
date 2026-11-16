@@ -464,16 +464,18 @@ test("Agents lists account identities and registers new agents without spending 
   await page.route("**/api/agents", async route => {
     expect(route.request().postDataJSON()).toMatchObject({ name: "Travel booker" });
     expect(route.request().postDataJSON()).not.toHaveProperty("limit");
+    expect(route.request().postDataJSON()).not.toHaveProperty("connect");
     registered = true;
     await route.fulfill({ status: 201, json: agent });
   });
   await page.goto("/agents");
   await expect(page.getByRole("region", { name: "Main account", exact: true })).toBeVisible();
-  await expect(page.getByText("No agents yet. Add an agent to get its identification value.")).toBeVisible();
+  await expect(page.getByText("No agents yet. Add one to connect an assistant like Claude.")).toBeVisible();
   await page.getByRole("button", { name: "Add agent", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Add agent", exact: true });
   await expect(dialog.getByLabel(/Spending limit|Expires|Rolling window/)).toHaveCount(0);
   await dialog.getByLabel("Agent name", { exact: true }).fill("Travel booker");
+  await dialog.getByRole("radio", { name: /With a mandate ID/ }).check();
   await dialog.getByRole("button", { name: "Add agent", exact: true }).click();
   await expect(dialog).toHaveCount(0);
   await expect(page.getByRole("heading", { name: "Travel booker", exact: true })).toBeVisible();
@@ -498,4 +500,48 @@ test("main's theme toggle persists and mandate cards use the merged wording", as
   await page.screenshot({ path: test.info().outputPath("dashboard.png"), fullPage: true });
   await page.setViewportSize({ width: 390, height: 844 });
   expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
+});
+
+test("an agent with its own key connects with a one-time code and its mandate has no secret ID", async ({ page }) => {
+  await mockWorkspace(page);
+  await mockClipboard(page);
+  const waiting = { id: "agt_claude", accountId: account.id, name: "Claude", verified: false, status: "waiting", createdAt: "2026-11-15T12:00:00Z", pairing: { code: "K7Q4-92XD", expiresAt: new Date(Date.now() + 30 * 60_000).toISOString() } };
+  const connected = { ...waiting, status: "connected", verified: true, pairing: undefined, publicKey: "GCF6WOEY735RPTS6EESGXC4KDLK2SHPGBULTSVLXRUY6HPWYRZ6LNFJW", verificationTxHash: "registration", explorerUrl: "https://explorer.example/tx/registration" };
+  let agents: unknown[] = [];
+  await page.route("**/api/workspace", route => route.fulfill({ json: { ...workspace, agents } }));
+  await page.route("**/api/agents", async route => {
+    expect(route.request().postDataJSON()).toMatchObject({ name: "Claude", connect: true });
+    agents = [waiting];
+    await route.fulfill({ status: 201, json: waiting });
+  });
+  await page.goto("/agents");
+  await page.getByRole("button", { name: "Add agent", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "Add agent", exact: true });
+  await dialog.getByLabel("Agent name", { exact: true }).fill("Claude");
+  await expect(dialog.getByRole("radio", { name: /With its own key/ })).toBeChecked();
+  await dialog.getByRole("button", { name: "Add agent", exact: true }).click();
+  const connect = page.getByRole("dialog", { name: "Connect Claude", exact: true });
+  await connect.getByRole("button", { name: "Connection code K7Q4-92XD, copy", exact: true }).click();
+  expect(await copiedValues(page)).toEqual(["K7Q4-92XD"]);
+  await expect(connect.getByText(/Connect to Mandate with code K7Q4-92XD/)).toBeVisible();
+  await connect.getByRole("button", { name: "Done", exact: true }).click();
+  await expect(page.getByText("Waiting to connect", { exact: true })).toBeVisible();
+
+  agents = [connected];
+  await page.route("**/api/mandates", async route => {
+    expect(route.request().postDataJSON()).toMatchObject({ recipient: "agt_claude" });
+    await route.fulfill({ status: 201, json: { mandate: { ...mandate, reference: "claude-groceries", recipient: "agt_claude", agentId: "agt_claude" } } });
+  });
+  await page.goto("/agents");
+  await expect(page.getByText("Connected · own key, verified on chain", { exact: true })).toBeVisible();
+  await page.goto("/mandates");
+  await page.getByRole("button", { name: "New mandate", exact: true }).click();
+  await page.getByRole("combobox", { name: "Mandate user (optional)", exact: true }).selectOption("agt_claude");
+  await page.getByLabel("Mandate name", { exact: true }).fill("Groceries");
+  await page.getByLabel("Spending limit (USD)", { exact: true }).fill("5");
+  await page.getByRole("button", { name: "Create mandate", exact: true }).click();
+  const created = page.locator(".mandate-form-card");
+  await expect(created.getByRole("heading", { name: "Mandate created" })).toBeVisible();
+  await expect(created.getByText(/Only Claude's own key can sign for this mandate/)).toBeVisible();
+  await expect(created.getByLabel("Mandate ID", { exact: true })).toHaveCount(0);
 });

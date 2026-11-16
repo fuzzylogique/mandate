@@ -33,6 +33,8 @@ export function amount(value: unknown): bigint {
   return units;
 }
 export interface CustomerRecord extends Customer { password: string; mainAccountId?: string; defaultChatMandateExpiresAt?: string }
+/** An agent, plus its one-time connection code while it is waiting (stored only as a hash). */
+export interface AgentRecord extends Omit<AccountAgent, "pairing"> { pairingHash?: string; pairingExpiresAt?: string; pairingVersion?: number }
 export interface MandateRecord extends Omit<AccountMandate, "reference" | "enforcement"> {
   id: string; mandateIdHash?: string;
   /** Service mandates are retained only as revoked historical records after upgrade. */
@@ -64,7 +66,9 @@ export interface State {
   customers: CustomerRecord[];
   schemaVersion: 1;
   accounts: SpendingAccount[];
-  agents?: AccountAgent[];
+  agents?: AgentRecord[];
+  /** Payments an agent prepared with its own key, waiting for its signature. */
+  agentPayments?: { id: string; agentId: string; mandateId: string; seller: string; amount: string; reference: string; createdAt: string }[];
   nextSellerId?: number;
   stellarPairs: StellarAccountPair[];
   mandates: MandateRecord[];
@@ -199,7 +203,7 @@ export class WorkspaceStore {
     const sharedIds = new Set(shared.map(s => s.mandate.reference));
     return {
       mode: "stellar-testnet", customer: publicCustomer(customer), accounts,
-      agents: (state.agents ?? []).filter(agent => owned.has(agent.accountId)),
+      agents: (state.agents ?? []).filter(agent => owned.has(agent.accountId)).map(({ pairingHash: _hash, pairingExpiresAt: _expires, pairingVersion: _version, ...agent }) => agent),
       mandates: state.mandates.filter(m => owned.has(m.accountId)).map(m => this.mandateView(state, m)), shared,
       activity: state.entries.filter(e => e.ownerId === customer.id || (e.mandateId && sharedIds.has(e.mandateId))).map(publicEntry).reverse(),
     };
