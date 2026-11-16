@@ -35,7 +35,7 @@ async function mockWorkspace(page: Page) {
 }
 
 for (const type of ["traditional", "stellar"] as const) {
-  for (const method of ["fiat", "testnet"] as const) {
+  for (const method of ["testnet"] as const) {
     test(`${type} account supports ${method} funding and retries with the same request ID`, async ({ page }) => {
       await mockWorkspace(page);
       let funded = false;
@@ -66,6 +66,73 @@ for (const type of ["traditional", "stellar"] as const) {
     });
   }
 }
+
+for (const type of ["traditional", "stellar"] as const) {
+  test(`${type} FIAT funding opens Stripe sandbox checkout and preserves the retry ID`, async ({ page }) => {
+    await mockWorkspace(page);
+    const requests: { method: string; amount: string; requestId: string }[] = [];
+    await page.route("**/api/workspace", route => route.fulfill({ json: { ...workspace, accounts: [{ ...account, type }] } }));
+    await page.route("**/api/accounts/bank/funding", async route => {
+      requests.push(route.request().postDataJSON());
+      if (requests.length === 1) return route.fulfill({ status: 503, json: { error: "Stripe checkout unavailable. Retry with the same request ID." } });
+      await route.fulfill({ status: 201, json: { status: "checkout", provider: "stripe", mode: "test", sessionId: "cs_test_browser", url: "https://checkout.stripe.com/c/pay/cs_test_browser" } });
+    });
+    await page.route("https://checkout.stripe.com/**", route => route.fulfill({ contentType: "text/html", body: "<h1>Stripe sandbox checkout</h1>" }));
+    await page.goto("/");
+    await page.getByRole("button", { name: "Add funds", exact: true }).click();
+    const dialog = page.getByRole("dialog", { name: "Add funds" });
+    await expect(dialog.getByRole("radio", { name: /FIAT/ })).toBeChecked();
+    await expect(dialog).toContainText("4242 4242 4242 4242");
+    await dialog.getByLabel("Amount (USD)", { exact: true }).fill("12.34");
+    await dialog.getByRole("button", { name: "Continue to Stripe", exact: true }).click();
+    await expect(dialog.getByRole("alert")).toContainText("Stripe checkout unavailable");
+    await expect(page.locator(".balance")).toHaveText("100 USD");
+    await dialog.getByRole("button", { name: "Continue to Stripe", exact: true }).click();
+    await expect(page).toHaveURL("https://checkout.stripe.com/c/pay/cs_test_browser");
+    expect(requests).toHaveLength(2);
+    expect(requests[1]).toEqual(requests[0]);
+    expect(requests[0]).toMatchObject({ method: "fiat", amount: "12.34" });
+  });
+}
+
+test("Stripe return waits for confirmed funding before refreshing the balance", async ({ page }) => {
+  await mockWorkspace(page);
+  let paid = false;
+  let funded = false;
+  await page.route("**/api/workspace", route => route.fulfill({ json: { ...workspace, accounts: [{ ...account, balance: funded ? "112.34" : "100" }] } }));
+  await page.route("**/api/funding/stripe/cs_test_return", async route => {
+    if (!paid) return route.fulfill({ json: { status: "pending" } });
+    funded = true;
+    await route.fulfill({ json: { status: "paid", payment: { id: "funded", kind: "funding", amount: "12.34" } } });
+  });
+  await page.goto("/activity?funding=success&session_id=cs_test_return");
+  await expect(page.getByRole("status")).toContainText("Waiting for Stripe payment confirmation");
+  await expect(page.locator(".balance")).toHaveText("100 USD");
+  paid = true;
+  await expect(page.getByRole("status")).toContainText("Stripe test payment confirmed", { timeout: 10_000 });
+  await expect(page.locator(".balance")).toHaveText("112.34 USD");
+});
+
+test("Stripe confirmation failures can be retried and cancellation does not credit funds", async ({ page }) => {
+  await mockWorkspace(page);
+  let calls = 0;
+  let unavailable = true;
+  await page.route("**/api/funding/stripe/cs_test_retry", async route => {
+    calls++;
+    if (unavailable) return route.fulfill({ status: 503, json: { error: "Stellar funding confirmation unavailable" } });
+    await route.fulfill({ json: { status: "expired" } });
+  });
+  await page.goto("/activity?funding=success&session_id=cs_test_retry");
+  await expect(page.getByRole("alert")).toContainText("Stellar funding confirmation unavailable");
+  unavailable = false;
+  await page.getByRole("button", { name: "Retry confirmation" }).click();
+  await expect(page.getByRole("status")).toContainText("checkout expired");
+  const callsBeforeCancel = calls;
+  await page.goto("/activity?funding=cancelled");
+  await expect(page.getByRole("status")).toContainText("checkout cancelled");
+  await expect(page.locator(".balance")).toHaveText("100 USD");
+  expect(calls).toBe(callsBeforeCancel);
+});
 
 test("dashboard refreshes the main account balance when returning after a payment", async ({ page }) => {
   await mockWorkspace(page);

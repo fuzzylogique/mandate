@@ -24,7 +24,10 @@ export function AccountForms({ action, onDone, onClose }: Props) {
   const submit = async (event: FormEvent) => {
     event.preventDefault(); setBusy(true); setError("");
     try {
-      if (action.kind === "fund") await api.fund(account.id, amount, requestId, fundingMethod);
+      if (action.kind === "fund") {
+        const result = await api.fund(account.id, amount, requestId, fundingMethod);
+        if ("status" in result && result.status === "checkout") { window.location.assign(result.url); return; }
+      }
       else await api.pay({ accountId: account.id, mandateReference: grant?.reference, ...(grant ? { agentId } : {}), amount, destination: recipient, reference, requestId });
       await onDone(); onClose();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Request failed"); }
@@ -35,10 +38,10 @@ export function AccountForms({ action, onDone, onClose }: Props) {
       <p className="muted">{account.name} · {account.currency} account</p>
       {action.kind === "fund" ? <>
         <fieldset className="field"><legend>Funding method</legend><div className="opening-choices two-choices">
-          <label className={`opening-choice ${fundingMethod === "fiat" ? "is-selected" : ""}`}><input type="radio" name="funding-method" value="fiat" checked={fundingMethod === "fiat"} disabled={busy} onChange={() => change(() => setFundingMethod("fiat"))} /><span><strong>FIAT</strong><span>Add demo USD. No bank or card charge.</span></span></label>
+          <label className={`opening-choice ${fundingMethod === "fiat" ? "is-selected" : ""}`}><input type="radio" name="funding-method" value="fiat" checked={fundingMethod === "fiat"} disabled={busy} onChange={() => change(() => setFundingMethod("fiat"))} /><span><strong>FIAT</strong><span>Pay by test card with Stripe sandbox.</span></span></label>
           <label className={`opening-choice ${fundingMethod === "testnet" ? "is-selected" : ""}`}><input type="radio" name="funding-method" value="testnet" checked={fundingMethod === "testnet"} disabled={busy} onChange={() => change(() => setFundingMethod("testnet"))} /><span><strong>Testnet</strong><span>Automatically fund with USD on Stellar testnet.</span></span></label>
         </div></fieldset>
-        <p className="form-note">{fundingMethod === "fiat" ? "Enter an amount to add demo USD. These demo funds settle on Stellar testnet." : "Enter an amount to use the automatic Stellar testnet funding flow. Testnet USD is issued and transferred into your account."} Your balance updates after confirmation.</p>
+        <p className="form-note">{fundingMethod === "fiat" ? "Continue to Stripe test checkout. Use test card 4242 4242 4242 4242 with a future expiry and any three-digit CVC. No real money is charged. Minimum 0.50 USD." : "Enter an amount to use the automatic Stellar testnet funding flow. Testnet USD is issued and transferred into your account."} Your balance updates after confirmation.</p>
       </> : <>
         {grant && <Field label="Agent identification"><input required maxLength={128} value={agentId} disabled={busy} onChange={event => change(() => setAgentId(event.target.value))} placeholder="agt_…" /></Field>}
         {grant && <p className="form-note">{grant.name}: {formatValue(grant.spent, grant.currency ?? account.currency)} of {money(grant.limit, grant.currency ?? account.currency)} used. Only verified recipients are allowed.</p>}
@@ -47,7 +50,7 @@ export function AccountForms({ action, onDone, onClose }: Props) {
       </>}
       <Field label="Amount (USD)"><input required inputMode="decimal" pattern={action.kind === "fund" ? "[0-9]+(\\.[0-9]{1,2})?" : "[0-9]+(\\.[0-9]{1,7})?"} value={amount} disabled={busy} onChange={event => change(() => setAmount(event.target.value))} placeholder="0.00" /></Field>
       {error && <p className="form-error" role="alert">{error}</p>}
-      <div className="form-actions"><button type="button" className="button" disabled={busy} onClick={onClose}>Cancel</button><button className="button is-primary" disabled={busy}>{busy ? "Confirming on Stellar…" : action.kind === "pay" ? "Confirm payment" : "Add funds"}</button></div>
+      <div className="form-actions"><button type="button" className="button" disabled={busy} onClick={onClose}>Cancel</button><button className="button is-primary" disabled={busy}>{busy ? action.kind === "fund" && fundingMethod === "fiat" ? "Opening Stripe…" : "Confirming on Stellar…" : action.kind === "pay" ? "Confirm payment" : fundingMethod === "fiat" ? "Continue to Stripe" : "Add funds"}</button></div>
     </form>
   </Dialog>;
 }

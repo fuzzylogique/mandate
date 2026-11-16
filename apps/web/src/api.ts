@@ -1,5 +1,4 @@
-import type { AccountAgent, FundingMethod, MandateCreation, CreateAccountMandateInput, Customer, MandatePaymentInput, MandatePaymentPreview, MandatePaymentResult, PaymentEntry, PaymentNetwork, PaymentWorkspace, SpendingAccount } from "@mandate/shared";
-import type { PaymentChatState } from "@mandate/shared";
+import type { AccountAgent, FiatCheckout, FiatFundingStatus, FundingMethod, MandateCreation, CreateAccountMandateInput, Customer, MandatePaymentInput, MandatePaymentPreview, MandatePaymentResult, PaymentChatState, PaymentEntry, PaymentNetwork, PaymentWorkspace, SpendingAccount } from "@mandate/shared";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -25,7 +24,8 @@ export const api = {
   register: (input: { name: string; email: string; password: string }) => request<Customer>("/auth/register", "POST", input),
   login: (input: { email: string; password: string }) => request<Customer>("/auth/login", "POST", input),
   logout: () => request<void>("/auth/logout", "POST"),
-  fund: (id: string, amount: string, requestId: string, method: FundingMethod) => request<PaymentEntry>(`/accounts/${id}/funding`, "POST", { amount, requestId, method }),
+  fund: (id: string, amount: string, requestId: string, method: FundingMethod) => request<PaymentEntry | FiatCheckout>(`/accounts/${id}/funding`, "POST", { amount, requestId, method }),
+  fiatFundingStatus: (sessionId: string) => request<FiatFundingStatus>(`/funding/stripe/${encodeURIComponent(sessionId)}`),
   createMandate: (input: CreateAccountMandateInput) => request<MandateCreation>("/mandates", "POST", input),
   revealMandate: (reference: string) => request<{ mandateId: string }>(`/mandates/${encodeURIComponent(reference)}/reveal`, "POST"),
   revoke: (id: string) => request<void>(`/mandates/${id}`, "DELETE"),

@@ -2,6 +2,15 @@
 export type PaymentRail = "traditional" | "blockchain";
 export type AccountType = "traditional" | "stellar";
 export type FundingMethod = "fiat" | "testnet";
+export interface FiatCheckout {
+  status: "checkout";
+  provider: "stripe";
+  mode: "test";
+  sessionId: string;
+  url: string;
+}
+export type FiatFundingStatus = { status: "paid"; payment: PaymentEntry }
+  | { status: "pending" | "expired" };
 export type PaymentCurrency = string;
 export type SpendingPeriod = "day" | "week" | "month";
 
@@ -78,6 +87,8 @@ export interface PaymentEntry {
   reference: string;
   createdAt: string;
   settlement: "traditional-demo" | "stellar-testnet";
+  /** Present when funding was authorized by a Stripe sandbox payment. */
+  stripeSessionId?: string;
   txHash?: string;
   explorerUrl?: string;
 }

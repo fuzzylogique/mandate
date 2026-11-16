@@ -1,10 +1,11 @@
 import { createHash, randomBytes } from "node:crypto";
 import { StrKey } from "@stellar/stellar-sdk";
 import { formatAmount, toBaseUnits } from "@mandate/shared";
-import type { AccountAgent, AccountMandate, AccountOpening, FundingMethod, MandateCreation, MandatePaymentPreview, PaymentEntry, PaymentWorkspace, SpendingAccount } from "@mandate/shared";
+import type { AccountAgent, AccountMandate, AccountOpening, FiatCheckout, FiatFundingStatus, FundingMethod, MandateCreation, MandatePaymentPreview, PaymentEntry, PaymentWorkspace, SpendingAccount } from "@mandate/shared";
 import { WorkspaceStore, ServiceError, amount, requireThat, text, validateMandateInput, type Actor, type EntryRecord, type MandateRecord, type StellarAccountPair, publicEntry } from "./store.ts";
 import type { ChainGateway, ChainReceipt } from "./stellar.ts";
 import { fundingAmount } from "./funding.ts";
+import { StripeSandbox, type FiatGateway, type StripeSession } from "./stripe.ts";
 
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 const timestamp = () => new Date().toISOString();
@@ -18,9 +19,11 @@ export class StellarPaymentService {
   private core: WorkspaceStore;
   private chain: ChainGateway;
   private chatSetups = new Map<string, Promise<ChatSetup>>();
-  constructor(path: string, chain: ChainGateway) {
+  private stripe: FiatGateway;
+  constructor(path: string, chain: ChainGateway, stripe: FiatGateway = new StripeSandbox()) {
     this.core = new WorkspaceStore(path);
     this.chain = chain;
+    this.stripe = stripe;
     const usd = chain.network.assets?.find(asset => asset.currency === "USD");
     this.network = { ...chain.network, currency: "USD", tokenContract: usd?.tokenContract ?? chain.network.tokenContract, assets: usd ? [usd] : undefined };
   }
@@ -249,24 +252,88 @@ export class StellarPaymentService {
     return { account: await this.createAccount(actor, body) };
   }
   async fund(actor: Actor, id: string, body: Record<string, unknown>) {
-    const method = body.method ?? "fiat";
-    requireThat(method === "fiat" || method === "testnet", 400, "Choose FIAT or Testnet funding");
+    const method = body.method ?? "testnet";
+    requireThat(method === "testnet", 400, "FIAT funding requires Stripe checkout and payment confirmation");
     let target = this.owned(actor, id);
     if (!target.address || !StrKey.isValidContract(target.address) || this.upgradePending(target.id)) { await this.upgradeTraditional(target); target = this.owned(actor, id); }
     requireThat(!body.sourceAccountId && !body.classicAccountId, 400, "Funding is managed automatically");
     const units = fundingAmount(body.amount);
     const commandId = this.commandId(actor, "add-funds", body.requestId);
-    // Keep existing FIAT retries compatible with requests made before method selection.
-    return this.chain.command(commandId, { accountId: id, amount: decimal(units), ...(method === "testnet" ? { method } : {}) }, () => this.fundAccount(actor, target, units, commandId, method === "testnet" ? "Testnet funding" : "Account funding", method));
+    return this.chain.command(commandId, { accountId: id, amount: decimal(units), method }, () => this.fundAccount(actor, target, units, commandId, "Testnet funding", method));
   }
-  private async fundAccount(actor: Actor, target: SpendingAccount, units: bigint, commandId: string, reference = "Account funding", method: FundingMethod = "fiat") {
+  async createFiatCheckout(actor: Actor, accountId: string, body: Record<string, unknown>): Promise<FiatCheckout> {
+    const account = this.owned(actor, accountId);
+    requireThat(!body.sourceAccountId && !body.classicAccountId, 400, "Funding is managed automatically");
+    const units = fundingAmount(body.amount);
+    const cents = Number(units / 100_000n);
+    requireThat(cents >= 50 && cents <= 99_999_999, 400, "Stripe sandbox deposits must be between 0.50 and 999,999.99 USD");
+    const id = `fiat_${digest(this.commandId(actor, "stripe-checkout", body.requestId))}`;
+    const funding = this.core.update(state => {
+      const records = state.fiatFunding ??= [];
+      let saved = records.find(record => record.id === id);
+      requireThat(!saved || (saved.accountId === account.id && saved.amount === decimal(units)), 409, "Idempotency key was used with different details");
+      if (!saved) { saved = { id, ownerId: account.ownerId, accountId: account.id, amount: decimal(units), cents }; records.push(saved); }
+      return saved;
+    });
+    const session = funding.sessionId ? await this.stripe.retrieve(funding.sessionId)
+      : await this.stripe.create({ id, accountId: account.id, ownerId: account.ownerId, cents, email: this.customer(actor).email });
+    this.validateFiatSession(session, funding);
+    requireThat(session.status === "open" && session.url?.startsWith("https://checkout.stripe.com/"), 409, "This checkout is complete or expired. Check Activity or start a new deposit.");
+    this.core.update(state => {
+      const saved = state.fiatFunding!.find(record => record.id === id)!;
+      requireThat(!saved.sessionId || saved.sessionId === session.id, 409, "Stripe checkout does not match the funding request");
+      saved.sessionId = session.id;
+    });
+    return { status: "checkout", provider: "stripe", mode: "test", sessionId: session.id, url: session.url! };
+  }
+  private validateFiatSession(session: StripeSession, funding: { id: string; accountId: string; ownerId: string; cents: number }) {
+    requireThat(session.livemode === false && session.mode === "payment", 400, "Only Stripe sandbox payments are supported");
+    requireThat(session.currency === "usd" && session.amount_total === funding.cents
+      && session.client_reference_id === funding.id && session.metadata?.fundingId === funding.id
+      && session.metadata?.accountId === funding.accountId && session.metadata?.ownerId === funding.ownerId, 400, "Stripe payment does not match the funding request");
+  }
+  async fiatFundingStatus(actor: Actor, sessionId: string): Promise<FiatFundingStatus> {
+    const customer = this.customer(actor);
+    const funding = this.core.read().fiatFunding?.find(record => record.sessionId === sessionId && record.ownerId === customer.id);
+    requireThat(funding, 404, "Funding checkout not found");
+    return this.settleFiatCheckout(sessionId);
+  }
+  async stripeWebhook(payload: Buffer, signature: string) {
+    const event = this.stripe.verifyEvent(payload, signature);
+    requireThat(event.livemode === false, 400, "Live Stripe events are disabled");
+    if (!["checkout.session.completed", "checkout.session.async_payment_succeeded"].includes(event.type)) return;
+    // Ignore unrelated sessions from the same Stripe sandbox.
+    if (!event.sessionId || !this.core.read().fiatFunding?.some(record => record.sessionId === event.sessionId)) return;
+    await this.settleFiatCheckout(event.sessionId);
+  }
+  private async settleFiatCheckout(sessionId: string): Promise<FiatFundingStatus> {
+    const funding = this.core.read().fiatFunding?.find(record => record.sessionId === sessionId);
+    requireThat(funding, 404, "Funding checkout not found");
+    const existing = funding.paymentId && this.core.read().entries.find(entry => entry.id === funding.paymentId);
+    if (existing) return { status: "paid", payment: publicEntry(existing) };
+    const session = await this.stripe.retrieve(sessionId);
+    requireThat(session.id === sessionId, 400, "Stripe checkout does not match the funding request");
+    this.validateFiatSession(session, funding);
+    if (session.status === "expired") return { status: "expired" };
+    if (session.status !== "complete" || session.payment_status !== "paid") return { status: "pending" };
+    const actor: Actor = { kind: "customer", id: funding.ownerId };
+    let target = this.owned(actor, funding.accountId);
+    if (!target.address || !StrKey.isValidContract(target.address) || this.upgradePending(target.id)) { await this.upgradeTraditional(target); target = this.owned(actor, target.id); }
+    const units = fundingAmount(funding.amount);
+    const commandId = `stripe-funding:${sessionId}`;
+    const payment = await this.chain.command(commandId, { accountId: target.id, amount: funding.amount, sessionId },
+      () => this.fundAccount(actor, target, units, commandId, "Stripe sandbox funding", "fiat", sessionId));
+    this.core.update(state => { state.fiatFunding!.find(record => record.id === funding.id)!.paymentId = payment.id; });
+    return { status: "paid", payment };
+  }
+  private async fundAccount(actor: Actor, target: SpendingAccount, units: bigint, commandId: string, reference = "Account funding", method: FundingMethod = "testnet", stripeSessionId?: string) {
     const currency = "USD";
     const source = this.chain.treasury(this.pair(target).classicWalletId);
     if (!this.chain.hasTransaction(commandId) && await this.chain.balance(source) === 0n) await this.chain.faucet(source);
     await this.chain.deposit(commandId, source, units, currency);
     const destination = this.chain.wallet(target.id);
     const receipt = await this.chain.transfer(commandId, source, source, destination.address, units, undefined, currency);
-    return this.record({ ownerId: target.ownerId, actorId: actor.id, accountId: target.id, source: method === "fiat" ? "Demo USD deposit" : "Stellar testnet funding", destination: destination.address, kind: "funding", amount: decimal(units), currency, mandateId: null, reference, requestId: commandId }, receipt);
+    return this.record({ ownerId: target.ownerId, actorId: actor.id, accountId: target.id, source: method === "fiat" ? "Stripe sandbox payment" : "Stellar testnet funding", destination: destination.address, kind: "funding", amount: decimal(units), currency, mandateId: null, reference, requestId: commandId, ...(stripeSessionId ? { stripeSessionId } : {}) }, receipt);
   }
   async createMandate(actor: Actor, body: Record<string, unknown>) {
     const main = await this.mainAccount(actor);

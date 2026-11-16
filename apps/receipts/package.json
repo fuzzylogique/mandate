@@ -11,7 +11,8 @@
     "@mandate/langchain": "workspace:*",
     "@mandate/shared": "workspace:*",
     "@stellar/stellar-sdk": "^16.4.1",
-    "express": "^5.1.0"
+    "express": "^5.1.0",
+    "stripe": "^23.1.0"
   },
   "devDependencies": {
     "@types/express": "^5.0.0",

@@ -56,6 +56,10 @@ export function validateMandateInput(body: Record<string, unknown>): Pick<Accoun
 export interface EntryRecord extends Omit<PaymentEntry, "mandateReference"> { mandateId: string | null; ownerId: string; actorId: string; requestId?: string }
 /** Private custody records; never included in a workspace or account response. */
 export interface StellarAccountPair { accountId: string; classicWalletId: string }
+export interface FiatFundingRecord {
+  id: string; ownerId: string; accountId: string; amount: string; cents: number;
+  sessionId?: string; paymentId?: string;
+}
 export interface State {
   customers: CustomerRecord[];
   schemaVersion: 1;
@@ -65,6 +69,7 @@ export interface State {
   stellarPairs: StellarAccountPair[];
   mandates: MandateRecord[];
   entries: EntryRecord[];
+  fiatFunding?: FiatFundingRecord[];
   sessions: { hash: string; customerId: string; expiresAt: string }[];
   traditionalUpgrades?: { accountId: string; balance: string; completed: boolean }[];
   demoRequests?: { id: string; fingerprint: string; result: unknown }[];

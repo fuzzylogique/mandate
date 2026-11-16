@@ -11,6 +11,7 @@ import { ChatPage } from "./ChatPage.tsx";
 import { SmartAccountAddress } from "./SmartAccountAddress.tsx";
 import { SecretMandateId } from "./SecretMandateId.tsx";
 import { SignIn } from "./SignIn.tsx";
+import { StripeFundingReturn } from "./StripeFundingReturn.tsx";
 import { initials, money, formatValue } from "./format.ts";
 import { Logo, PlusIcon } from "./icons.tsx";
 
@@ -78,6 +79,7 @@ function WorkspaceApp() {
   return <div className="page payment-page">
     <header className="glass topbar"><a className="brand" href="/"><Logo />Mandate</a><div className="topbar-side"><a className="button" href="/chat">Chat</a><a className="button" href="/pay">Pay</a><span className="pill">{network?.name ?? "Connecting…"}</span>{workspace && <><span className="owner"><span className="owner-avatar" aria-hidden="true">{initials(workspace.customer.name)}</span><span className="owner-name">{workspace.customer.name}</span></span><button className="button is-quiet" disabled={busy} onClick={() => void logout()}>Sign out</button></>}<ThemeToggle /></div></header>
     {error && <p className="banner is-bad" role="alert">{error} <button className="button is-quiet" onClick={() => void refresh()}>Retry</button></p>}
+    {workspace && <StripeFundingReturn onDone={refresh} />}
     {loading ? <p className="loading muted">Loading your workspace…</p> : !workspace ? <SignIn onSignedIn={refresh} /> : <main>
       {account && <section className="hero main-account" aria-label="Main account">
         <div className="main-account-summary">

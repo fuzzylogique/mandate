@@ -10,6 +10,30 @@ import { StellarPaymentService } from "./stellar-service.ts";
 import { StellarGateway, stellarConfig, type ChainGateway, type ChainWallet } from "./stellar.ts";
 import { ServiceError, WorkspaceStore } from "./store.ts";
 import { createPaymentApp } from "./http.ts";
+import Stripe from "stripe";
+import { StripeSandbox, type FiatGateway, type StripeCheckoutInput, type StripeSession } from "./stripe.ts";
+
+class TestStripe implements FiatGateway {
+  sessions = new Map<string, StripeSession>();
+  verifier = new StripeSandbox({ STRIPE_SECRET_KEY: "sk_test_fixture", STRIPE_WEBHOOK_SECRET: "whsec_fixture" });
+  async create(input: StripeCheckoutInput): Promise<StripeSession> {
+    const id = `cs_test_${input.id}`;
+    if (!this.sessions.has(id)) this.sessions.set(id, {
+      id, url: `https://checkout.stripe.com/c/pay/${id}`, livemode: false, mode: "payment", status: "open", payment_status: "unpaid",
+      currency: "usd", amount_total: input.cents, client_reference_id: input.id,
+      metadata: { fundingId: input.id, ownerId: input.ownerId, accountId: input.accountId },
+    });
+    return this.retrieve(id);
+  }
+  async retrieve(id: string) { return structuredClone(this.sessions.get(id)!); }
+  verifyEvent(payload: Buffer, signature: string) { return this.verifier.verifyEvent(payload, signature); }
+  paid(id: string) { Object.assign(this.sessions.get(id)!, { status: "complete", payment_status: "paid" }); }
+  event(id: string, type = "checkout.session.completed", livemode = false) {
+    const payload = JSON.stringify({ id: "evt_test", type, livemode, data: { object: { id } } });
+    const signature = new Stripe("sk_test_fixture").webhooks.generateTestHeaderString({ payload, secret: "whsec_fixture" });
+    return { payload: Buffer.from(payload), signature };
+  }
+}
 
 /** Fake network for service tests. It owns balances; the service cannot create money. */
 class TestChain implements ChainGateway {
@@ -99,8 +123,8 @@ class TestChain implements ChainGateway {
   async revokeMandate(_id: string, _treasury: ChainWallet, _account: ChainWallet, ruleId: number) { if (this.fail) throw new Error("Network unavailable"); assert.equal(_treasury.id, this.owners.get(_account.id)); this.rules.get(ruleId)!.revoked = true; return this.receipt(); }
   async spent(_account: ChainWallet, ruleId: number) { const rule = this.rules.get(ruleId)!; return rule.history.filter(entry => entry.time > Date.now() - rule.periodMs).reduce((sum, entry) => sum + entry.amount, 0n); }
 }
-async function fixture(path = ":memory:") {
-  const chain = new TestChain(); const service = new StellarPaymentService(path, chain);
+async function fixture(path = ":memory:", stripe?: FiatGateway) {
+  const chain = new TestChain(); const service = new StellarPaymentService(path, chain, stripe);
   const registered = await service.register({ name: "Chain owner", email: "owner@example.com", password: "long chain password" });
   const owner = service.authenticate(registered.token);
   const agent = await service.createAgent(owner, { name: "Buyer", requestId: "buyer" });
@@ -353,7 +377,7 @@ test("funding and payments use network addresses and only journal confirmed rece
     const input = { amount: "10", requestId: "fund" };
     const entry = await service.fund(owner, account.id, input);
     assert.equal(entry.destination, account.address);
-    assert.equal(entry.source, "Demo USD deposit");
+    assert.equal(entry.source, "Stellar testnet funding");
     assert.equal(chain.deposits[0]!.destination, chain.wallet(chain.owners.get(account.id)!).address);
     assert.equal(entry.settlement, "stellar-testnet"); assert.ok(entry.txHash);
     await service.fund(owner, account.id, input);
@@ -833,7 +857,7 @@ test("HTTP sessions protect management routes and public payments require the ma
   assert.equal(identityResponse.status, 201);
   const identity = await identityResponse.json() as { id: string };
   assert.equal((await send(`/accounts/${source.id}/funding`, { amount: "10", requestId: "fund" }, { ...session, origin: "https://other.example" })).status, 403);
-  assert.equal((await send(`/accounts/${source.id}/funding`, { amount: "10", requestId: "fund" }, session)).status, 201);
+  assert.equal((await send(`/accounts/${source.id}/funding`, { amount: "10", method: "testnet", requestId: "fund" }, session)).status, 201);
   const grant = await send("/mandates", { accountId: source.id, name: "HTTP agent", recipientType: "agent", recipient: "api-agent", limit: "3", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: "grant" }, session);
   assert.equal(grant.status, 201);
   const result = await grant.json() as { mandateId: string; mandate: { reference: string } };
@@ -957,19 +981,19 @@ test("stored mandates preserve signing rules and secret IDs through normalizatio
   } finally { service.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
-test("Add funds directly confirms the entered demo USD amount and processes retries once", async t => {
+test("Testnet Add funds confirms the entered demo USD amount and processes retries once", async t => {
   const { chain, service, owner, token, agentId } = await fixture();
   const source = (await service.openAccount(owner, { name: "Demo USD", type: "traditional", requestId: "source" })).account;
   const server = createPaymentApp(service).listen(0, "127.0.0.1");
   await new Promise<void>(resolve => server.once("listening", resolve));
   t.after(() => { server.close(); service.close(); });
   const port = (server.address() as { port: number }).port;
-  const send = () => fetch(`http://127.0.0.1:${port}/api/accounts/${source.id}/funding`, { method: "POST", headers: { "content-type": "application/json", cookie: `mandate_session=${token}` }, body: JSON.stringify({ amount: "12.34", requestId: "demo-funding" }) });
+  const send = () => fetch(`http://127.0.0.1:${port}/api/accounts/${source.id}/funding`, { method: "POST", headers: { "content-type": "application/json", cookie: `mandate_session=${token}` }, body: JSON.stringify({ amount: "12.34", method: "testnet", requestId: "demo-funding" }) });
   const completed = await send();
   assert.equal(completed.status, 201);
   const receipt = await completed.json() as { id: string; amount: string; source: string };
   assert.equal(receipt.amount, "12.34");
-  assert.equal(receipt.source, "Demo USD deposit");
+  assert.equal(receipt.source, "Stellar testnet funding");
   assert.equal((await (await send()).json() as { id: string }).id, receipt.id);
   assert.equal(chain.deposits.length, 1);
   assert.equal(chain.deposits[0]!.amount, 123_400_000n);
@@ -1119,7 +1143,8 @@ test("legacy Stellar metadata and cached openings expose USD without reinterpret
 });
 
 test("one account can be opened without a type and funded by FIAT or automatic Testnet", async () => {
-  const { chain, service, owner, agentId } = await fixture();
+  const stripe = new TestStripe();
+  const { chain, service, owner, agentId } = await fixture(":memory:", stripe);
   try {
     const input = { name: "Operations", requestId: "unified-opening" };
     const opened = await service.openAccount(owner, input);
@@ -1129,15 +1154,22 @@ test("one account can be opened without a type and funded by FIAT or automatic T
     assert.equal(opened.account.verified, true);
     const fiat = { amount: "12.34", method: "fiat", requestId: "fiat-funding" };
     const testnet = { amount: "5", method: "testnet", requestId: "testnet-funding" };
-    const deposit = await service.fund(owner, opened.account.id, fiat);
+    const checkout = await service.createFiatCheckout(owner, opened.account.id, fiat);
+    assert.equal(chain.deposits.length, 0);
+    stripe.paid(checkout.sessionId);
+    const settled = await service.fiatFundingStatus(owner, checkout.sessionId);
+    assert.equal(settled.status, "paid");
+    if (settled.status !== "paid") throw new Error("Expected settled funding");
+    const deposit = settled.payment;
     const funding = await service.fund(owner, opened.account.id, testnet);
-    assert.equal(deposit.source, "Demo USD deposit");
+    assert.equal(deposit.source, "Stripe sandbox payment");
+    assert.equal(deposit.stripeSessionId, checkout.sessionId);
     assert.equal(funding.source, "Stellar testnet funding");
     assert.equal(funding.reference, "Testnet funding");
-    assert.equal((await service.fund(owner, opened.account.id, fiat)).id, deposit.id);
+    assert.deepEqual(await service.fiatFundingStatus(owner, checkout.sessionId), settled);
     assert.equal((await service.fund(owner, opened.account.id, testnet)).id, funding.id);
-    await assert.rejects(service.fund(owner, opened.account.id, { ...fiat, method: "testnet" }), { status: 409 });
-    await assert.rejects(service.fund(owner, opened.account.id, { ...testnet, method: "fiat" }), { status: 409 });
+    await assert.rejects(service.createFiatCheckout(owner, opened.account.id, { ...fiat, amount: "13" }), { status: 409 });
+    await assert.rejects(service.fund(owner, opened.account.id, { ...testnet, method: "fiat" }), { status: 400 });
     await assert.rejects(service.fund(owner, opened.account.id, { ...fiat, method: "invalid", requestId: "invalid-method" }), { status: 400 });
     assert.equal(chain.deposits.length, 2);
     assert.equal(chain.transfers.length, 2);
@@ -1146,6 +1178,122 @@ test("one account can be opened without a type and funded by FIAT or automatic T
     assert.equal(workspace.accounts.length, 1);
     assert.equal(workspace.accounts[0]!.balance, "17.34");
     assert.equal(workspace.activity.length, 2);
+  } finally { service.close(); }
+});
+
+test("Stripe checkout enforces ownership, amounts and test mode without crediting unpaid sessions", async () => {
+  const stripe = new TestStripe();
+  const { chain, service, owner } = await fixture(":memory:", stripe);
+  try {
+    const account = (await service.workspace(owner)).accounts[0]!;
+    const input = { amount: "12.34", requestId: "checkout" };
+    const checkout = await service.createFiatCheckout(owner, account.id, input);
+    assert.deepEqual(await service.createFiatCheckout(owner, account.id, input), checkout);
+    assert.equal(stripe.sessions.size, 1);
+    assert.deepEqual(await service.fiatFundingStatus(owner, checkout.sessionId), { status: "pending" });
+    const seller = await sellerAccount(service);
+    const other = { kind: "customer" as const, id: seller.ownerId };
+    await assert.rejects(service.createFiatCheckout(other, account.id, input), { status: 404 });
+    await assert.rejects(service.fiatFundingStatus(other, checkout.sessionId), { status: 404 });
+    for (const value of ["0.49", "0", "1.001", "1000000"]) {
+      await assert.rejects(service.createFiatCheckout(owner, account.id, { amount: value, requestId: value }), { status: 400 });
+    }
+    const session = stripe.sessions.get(checkout.sessionId)!;
+    stripe.paid(session.id);
+    for (const tamper of [{ livemode: true }, { currency: "eur" }, { amount_total: 999 }, { metadata: {} }, { client_reference_id: "wrong" }]) {
+      const original = structuredClone(session);
+      Object.assign(session, tamper);
+      await assert.rejects(service.fiatFundingStatus(owner, session.id), { status: 400 });
+      Object.assign(session, original);
+    }
+    Object.assign(session, { status: "expired", payment_status: "unpaid" });
+    assert.deepEqual(await service.fiatFundingStatus(owner, session.id), { status: "expired" });
+    await assert.rejects(service.createFiatCheckout(owner, account.id, input), { status: 409 });
+    assert.equal(chain.deposits.length, 0);
+    assert.equal((await service.workspace(owner)).activity.length, 0);
+  } finally { service.close(); }
+});
+
+test("Stripe webhook verifies raw signatures, waits for paid status and credits repeated events once", async t => {
+  const stripe = new TestStripe();
+  const { chain, service, owner, token } = await fixture(":memory:", stripe);
+  const server = createPaymentApp(service).listen(0, "127.0.0.1");
+  await new Promise<void>(resolve => server.once("listening", resolve));
+  t.after(async () => { await new Promise<void>(resolve => server.close(() => resolve())); service.close(); });
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api`;
+  const account = (await service.workspace(owner)).accounts[0]!;
+  const body = JSON.stringify({ amount: "12.34", requestId: "checkout" });
+  assert.equal((await fetch(`${base}/accounts/${account.id}/funding`, { method: "POST", headers: { "content-type": "application/json" }, body })).status, 401);
+  // Omitted method selects Stripe FIAT, never direct token issuance.
+  const response = await fetch(`${base}/accounts/${account.id}/funding`, { method: "POST", headers: { "content-type": "application/json", cookie: `mandate_session=${token}` }, body });
+  assert.equal(response.status, 201);
+  const checkout = await response.json() as { status: string; sessionId: string; mode: string };
+  assert.equal(checkout.status, "checkout"); assert.equal(checkout.mode, "test");
+  const webhook = (event = stripe.event(checkout.sessionId), signature = event.signature) => fetch(`${base}/stripe/webhook`, {
+    method: "POST", headers: { "content-type": "application/json", "stripe-signature": signature }, body: event.payload,
+  });
+  assert.equal((await webhook(undefined, "invalid")).status, 400);
+  const changed = stripe.event(checkout.sessionId);
+  changed.payload = Buffer.from(changed.payload.toString().replace("evt_test", "evt_changed"));
+  assert.equal((await webhook(changed)).status, 400);
+  const stale = stripe.event(checkout.sessionId);
+  stale.signature = new Stripe("sk_test_fixture").webhooks.generateTestHeaderString({ payload: stale.payload.toString(), secret: "whsec_fixture", timestamp: Math.floor(Date.now() / 1000) - 600 });
+  assert.equal((await webhook(stale)).status, 400);
+  assert.equal((await webhook(stripe.event(checkout.sessionId, "checkout.session.completed", true))).status, 400);
+  assert.equal((await webhook()).status, 200);
+  assert.equal(chain.deposits.length, 0);
+  stripe.paid(checkout.sessionId);
+  assert.equal((await webhook(stripe.event("cs_unrelated"))).status, 200);
+  assert.equal(chain.deposits.length, 0);
+  assert.equal((await webhook()).status, 200);
+  assert.equal((await webhook()).status, 200);
+  assert.equal((await webhook(stripe.event(checkout.sessionId, "checkout.session.async_payment_succeeded"))).status, 200);
+  assert.equal(chain.deposits.length, 1); assert.equal(chain.transfers.length, 1);
+  assert.equal((await service.workspace(owner)).accounts[0]!.balance, "12.34");
+  assert.equal((await fetch(`${base}/funding/stripe/${checkout.sessionId}`)).status, 401);
+  const confirmed = await fetch(`${base}/funding/stripe/${checkout.sessionId}`, { headers: { cookie: `mandate_session=${token}` } });
+  assert.equal((await confirmed.json() as { status: string }).status, "paid");
+  assert.equal(chain.transfers.length, 1);
+});
+
+test("paid Stripe funding resumes after forwarding failure and restart without a second deposit", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mandate-stripe-recovery-"));
+  const path = join(directory, "workspace.sqlite");
+  const stripe = new TestStripe();
+  const initial = await fixture(path, stripe);
+  const { chain, owner } = initial;
+  let service = initial.service;
+  try {
+    const account = (await service.workspace(owner)).accounts[0]!;
+    const input = { amount: "7.25", requestId: "retry" };
+    const checkout = await service.createFiatCheckout(owner, account.id, input);
+    service.close(); service = new StellarPaymentService(path, chain, stripe);
+    assert.equal((await service.createFiatCheckout(owner, account.id, input)).sessionId, checkout.sessionId);
+    stripe.paid(checkout.sessionId);
+    chain.failFunding = true;
+    await assert.rejects(service.fiatFundingStatus(owner, checkout.sessionId));
+    assert.equal(chain.deposits.length, 1); assert.equal(chain.transfers.length, 0);
+    assert.equal((await service.workspace(owner)).activity.length, 0);
+    service.close(); service = new StellarPaymentService(path, chain, stripe);
+    chain.failFunding = false;
+    const { payload, signature } = stripe.event(checkout.sessionId);
+    await service.stripeWebhook(payload, signature);
+    assert.equal((await service.fiatFundingStatus(owner, checkout.sessionId)).status, "paid");
+    assert.equal(chain.deposits.length, 1); assert.equal(chain.transfers.length, 1);
+    assert.equal((await service.workspace(owner)).accounts[0]!.balance, "7.25");
+  } finally { service.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("Stripe FIAT requires sandbox credentials while Testnet funding stays available", async () => {
+  for (const env of [{}, { STRIPE_SECRET_KEY: "sk_live_forbidden", STRIPE_WEBHOOK_SECRET: "whsec_test" }, { STRIPE_SECRET_KEY: "sk_test_configured" }]) {
+    const stripe = new StripeSandbox(env);
+    await assert.rejects(stripe.create({ id: "funding", accountId: "account", ownerId: "owner", cents: 100, email: "owner@example.com" }), { status: 503 });
+  }
+  const { service, owner } = await fixture(":memory:", new StripeSandbox({}));
+  try {
+    const account = (await service.workspace(owner)).accounts[0]!;
+    await assert.rejects(service.createFiatCheckout(owner, account.id, { amount: "1", requestId: "missing-config" }), { status: 503 });
+    assert.equal((await service.fund(owner, account.id, { amount: "1", method: "testnet", requestId: "testnet" })).amount, "1");
   } finally { service.close(); }
 });
 
