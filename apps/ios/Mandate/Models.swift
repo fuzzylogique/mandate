@@ -22,7 +22,7 @@ struct Money: Hashable {
         self.init(value: (Decimal(string: base) ?? 0) / 10_000_000, token: token)
     }
 
-    var isDollars: Bool { token.symbol == "USDC" }
+    var isDollars: Bool { token.symbol == "USDC" || token.symbol == "USD" }
 
     private func number(minDigits: Int, maxDigits: Int) -> String {
         let formatter = NumberFormatter()
@@ -58,7 +58,8 @@ struct Money: Hashable {
 }
 
 /// Someone you've allowed to spend, and the limit they spend under.
-struct Shopper: Codable, Identifiable, Hashable {
+struct Mandate: Codable, Identifiable, Hashable {
+    let reference: String
     let ruleId: Int
     let name: String
     let status: String
@@ -122,7 +123,7 @@ struct Overview: Codable {
 
     let owner: Owner
     let account: Account
-    let mandates: [Shopper]
+    let mandates: [Mandate]
     let sellers: [Seller]
     let catalog: [CatalogItem]
 }
@@ -146,6 +147,7 @@ struct Activity: Codable, Identifiable, Hashable {
     let reason: String?
 
     var blocked: Bool { kind == "declined" }
+    var isFunding: Bool { kind == "funding" }
     var date: Date { Dates.parse(at) }
     var money: Money { Money(base: amount, token: token) }
 }

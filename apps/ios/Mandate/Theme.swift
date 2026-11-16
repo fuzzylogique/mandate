@@ -9,8 +9,8 @@ extension Color {
     static let trusted = Color(red: 141 / 255, green: 252 / 255, blue: 192 / 255)
     static let soft = Color.white.opacity(0.74)
 
-    /// Each shopper keeps its own colour.
-    static func shopper(_ id: Int) -> Color {
+    /// Each mandate keeps its own colour.
+    static func mandate(_ id: Int) -> Color {
         let colors: [Color] = [
             .glow,
             Color(red: 185 / 255, green: 166 / 255, blue: 1),

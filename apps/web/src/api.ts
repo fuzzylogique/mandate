@@ -1,31 +1,31 @@
-// Calls to the dashboard API (apps/receipts).
-import type { Activity, Mandate, MandatePeriod, Overview, PurchaseResult } from "@mandate/shared";
+import type { AccountAgent, FundingMethod, MandateCreation, CreateAccountMandateInput, Customer, MandatePaymentInput, MandatePaymentPreview, MandatePaymentResult, PaymentEntry, PaymentNetwork, PaymentWorkspace, SpendingAccount } from "@mandate/shared";
 
-const API_URL = import.meta.env.VITE_RECEIPTS_URL ?? "http://localhost:4022";
-
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export class ApiError extends Error {
+  constructor(public status: number, message: string) { super(message); }
+}
+async function request<T>(path: string, method = "GET", body?: unknown): Promise<T> {
   let response: Response;
   try {
-    response = await fetch(`${API_URL}${path}`, {
-      ...init,
-      headers: init?.body ? { "content-type": "application/json" } : undefined,
-    });
-  } catch {
-    throw new Error("Can't reach the Mandate service. Is it running?");
-  }
+    response = await fetch(`/api${path}`, { method, credentials: path === "/pay" || path === "/pay/preview" ? "omit" : "same-origin", headers: { ...(body ? { "content-type": "application/json" } : {}) }, body: body ? JSON.stringify(body) : undefined });
+  } catch { throw new Error("Can't reach the Mandate service. Start pnpm dev:receipts and try again."); }
   if (!response.ok) {
-    const body = (await response.json().catch(() => null)) as { error?: string } | null;
-    throw new Error(body?.error ?? `Request failed (${response.status})`);
+    const result = await response.json().catch(() => null) as { error?: string } | null;
+    throw new ApiError(response.status, result?.error ?? `Request failed (${response.status})`);
   }
   return (response.status === 204 ? undefined : await response.json()) as T;
 }
-
 export const api = {
-  overview: () => request<Overview>("/overview"),
-  activity: () => request<Activity[]>("/activity"),
-  createAgent: (input: { name: string; limit: string; period: MandatePeriod }) =>
-    request<Mandate>("/mandates", { method: "POST", body: JSON.stringify(input) }),
-  revokeAgent: (ruleId: number) => request<void>(`/mandates/${ruleId}`, { method: "DELETE" }),
-  purchase: (ruleId: number, itemId: string) =>
-    request<PurchaseResult>("/purchases", { method: "POST", body: JSON.stringify({ ruleId, itemId }) }),
+  createAgent: (input: { name: string; requestId: string }) => request<AccountAgent>("/agents", "POST", input),
+  workspace: () => request<PaymentWorkspace>("/workspace"),
+  network: () => request<{ mode: PaymentWorkspace["mode"]; network?: PaymentNetwork }>("/network"),
+  register: (input: { name: string; email: string; password: string }) => request<Customer>("/auth/register", "POST", input),
+  login: (input: { email: string; password: string }) => request<Customer>("/auth/login", "POST", input),
+  logout: () => request<void>("/auth/logout", "POST"),
+  fund: (id: string, amount: string, requestId: string, method: FundingMethod) => request<PaymentEntry>(`/accounts/${id}/funding`, "POST", { amount, requestId, method }),
+  createMandate: (input: CreateAccountMandateInput) => request<MandateCreation>("/mandates", "POST", input),
+  revealMandate: (reference: string) => request<{ mandateId: string }>(`/mandates/${encodeURIComponent(reference)}/reveal`, "POST"),
+  revoke: (id: string) => request<void>(`/mandates/${id}`, "DELETE"),
+  pay: (input: { accountId: string; mandateReference?: string; agentId?: string; amount: string; destination: string; reference: string; requestId: string }) => request<PaymentEntry>("/payments", "POST", input),
+  previewMandatePayment: (input: MandatePaymentInput) => request<MandatePaymentPreview>("/pay/preview", "POST", input),
+  payWithMandate: (input: MandatePaymentInput) => request<MandatePaymentResult>("/pay", "POST", input),
 };

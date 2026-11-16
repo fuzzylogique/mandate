@@ -1,326 +1,112 @@
-// The owner's account: balance, shoppers and what each has left, and everything
-// the shoppers have bought or been blocked from buying.
 import { useCallback, useEffect, useRef, useState } from "react";
-import { toBaseUnits, type Activity, type CatalogItem, type Mandate, type MandatePeriod, type Overview } from "@mandate/shared";
-import { ActivityList } from "./ActivityList.tsx";
-import { api } from "./api.ts";
-import { money, moneyParts, roundMoney, ruleSummary } from "./format.ts";
-import { Logo, MoonIcon, PlusIcon, ShieldIcon, SunIcon } from "./icons.tsx";
-import { NewShopper } from "./NewShopper.tsx";
-import { ReceiptDialog } from "./ReceiptDialog.tsx";
-import { ShopperCard } from "./ShopperCard.tsx";
-
-const REFRESH_MS = 4000;
-/** How many purchases "Latest" shows before the owner asks for the rest. */
-const LATEST_ROWS = 8;
-
-interface Toast {
-  id: number;
-  kind: "good" | "bad";
-  text: string;
-}
-
-const isToday = (iso: string) => new Date(iso).toDateString() === new Date().toDateString();
+import type { AccountAgent, PaymentEntry, PaymentNetwork, PaymentWorkspace, SpendingAccount } from "@mandate/shared";
+import { api, ApiError } from "./api.ts";
+import { Agents } from "./Agents.tsx";
+import { AccountForms, type AccountAction } from "./AccountForms.tsx";
+import { NewMandate } from "./NewMandate.tsx";
+import { MandateCard } from "./MandateCard.tsx";
+import { ThemeToggle } from "./ThemeToggle.tsx";
+import { PayPage } from "./PayPage.tsx";
+import { SmartAccountAddress } from "./SmartAccountAddress.tsx";
+import { SecretMandateId } from "./SecretMandateId.tsx";
+import { SignIn } from "./SignIn.tsx";
+import { initials, money, formatValue } from "./format.ts";
+import { Logo, PlusIcon } from "./icons.tsx";
 
 export function App() {
-  const [overview, setOverview] = useState<Overview | null>(null);
-  const [activity, setActivity] = useState<Activity[]>([]);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<Record<number, string>>({});
-  const [toasts, setToasts] = useState<Toast[]>([]);
-  const [openItem, setOpenItem] = useState<Activity | null>(null);
-  const [adding, setAdding] = useState(false);
-  const [showAll, setShowAll] = useState(false);
-  const [freshIds, setFreshIds] = useState<Set<string>>(new Set());
-  const seenIds = useRef<Set<string> | null>(null);
-  const nextToastId = useRef(1);
+  return window.location.pathname.replace(/\/$/, "") === "/pay" ? <PayPage /> : <WorkspaceApp />;
+}
 
+function WorkspaceApp() {
+  const pathname = window.location.pathname.replace(/\/$/, "");
+  const page = pathname === "/agents" ? "agents" : pathname === "/activity" ? "activity" : "mandates";
+  const [workspace, setWorkspace] = useState<PaymentWorkspace | null>(null);
+  const [network, setNetwork] = useState<PaymentNetwork>();
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  const [action, setAction] = useState<AccountAction | null>(null);
+  const [creatingMandate, setCreatingMandate] = useState(false);
+  const [confirmRevoke, setConfirmRevoke] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const generation = useRef(0);
+  const refreshVersion = useRef(0);
   const refresh = useCallback(async () => {
+    const session = generation.current;
+    const version = ++refreshVersion.current;
     try {
-      const [nextOverview, nextActivity] = await Promise.all([api.overview(), api.activity()]);
-      setOverview(nextOverview);
-      setActivity(nextActivity);
-      setError(null);
-
-      // Remember what was already there on first load; highlight what comes after.
-      if (seenIds.current === null) {
-        seenIds.current = new Set(nextActivity.map((item) => item.id));
-      } else {
-        const seen = seenIds.current;
-        const arrived = nextActivity.filter((item) => !seen.has(item.id)).map((item) => item.id);
-        if (arrived.length > 0) {
-          arrived.forEach((id) => seen.add(id));
-          setFreshIds((current) => new Set([...current, ...arrived]));
-        }
-      }
+      const data = await api.workspace();
+      if (session === generation.current && version === refreshVersion.current) { setWorkspace(data); setNetwork(data.network); setError(""); }
     } catch (cause) {
-      setError(cause instanceof Error ? cause.message : "Something went wrong");
-    }
+      if (session !== generation.current || version !== refreshVersion.current) return;
+      if (cause instanceof ApiError && cause.status === 401) { setWorkspace(null); setAction(null); setCreatingMandate(false); }
+      else setError(cause instanceof Error ? cause.message : "Could not load your workspace");
+    } finally { if (session === generation.current && version === refreshVersion.current) setLoading(false); }
   }, []);
-
   useEffect(() => {
-    void refresh();
-    const timer = setInterval(() => void refresh(), REFRESH_MS);
-    return () => clearInterval(timer);
+    const load = () => { void api.network().then(data => setNetwork(data.network)).catch(() => undefined); void refresh(); };
+    const onFocus = () => { void refresh(); };
+    const onVisibility = () => { if (document.visibilityState === "visible") void refresh(); };
+    load();
+    const timer = setInterval(load, 15_000);
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      clearInterval(timer);
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
   }, [refresh]);
-
-  const toast = useCallback((kind: Toast["kind"], text: string) => {
-    const id = nextToastId.current++;
-    setToasts((current) => [...current, { id, kind, text }]);
-    setTimeout(() => setToasts((current) => current.filter((entry) => entry.id !== id)), 6000);
-  }, []);
-
-  /** Runs one action for a shopper, showing `label` on its card meanwhile. */
-  const withBusy = async (ruleId: number, label: string, action: () => Promise<void>) => {
-    setBusy((current) => ({ ...current, [ruleId]: label }));
-    try {
-      await action();
-    } catch (cause) {
-      toast("bad", cause instanceof Error ? cause.message : "Something went wrong");
-    } finally {
-      setBusy((current) => {
-        const { [ruleId]: _done, ...rest } = current;
-        return rest;
-      });
-      void refresh();
-    }
+  const logout = async () => {
+    setBusy(true);
+    try { await api.logout(); generation.current++; setWorkspace(null); setAction(null); setCreatingMandate(false); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Could not sign out"); }
+    finally { setBusy(false); }
   };
-
-  const purchase = (shopper: Mandate, item: CatalogItem) =>
-    withBusy(shopper.ruleId, `Shopping at ${item.seller.name}…`, async () => {
-      const result = await api.purchase(shopper.ruleId, item.id);
-      const price = roundMoney(toBaseUnits(item.price), shopper.token);
-      if (result.status === "paid") {
-        toast("good", `${shopper.name} paid ${item.seller.name} ${price} for ${item.title.toLowerCase()}.`);
-      } else {
-        const reason = result.reason ?? "Blocked by your account's rules";
-        toast("bad", `Blocked: ${shopper.name} tried to pay ${item.seller.name} ${price}. ${reason}. Nothing was paid.`);
-      }
-    });
-
-  const stop = (shopper: Mandate) =>
-    withBusy(shopper.ruleId, "Stopping…", async () => {
-      await api.revokeAgent(shopper.ruleId);
-      toast("good", `${shopper.name} is stopped and can't spend any more.`);
-    });
-
-  const addShopper = async (input: { name: string; limit: string; period: MandatePeriod }) => {
-    const shopper = await api.createAgent(input);
-    toast("good", `${shopper.name} is ready. ${ruleSummary(shopper)}.`);
-    void refresh();
+  const revoke = async (id: string) => {
+    setBusy(true);
+    try { await api.revoke(id); setConfirmRevoke(null); await refresh(); }
+    catch (cause) { setError(cause instanceof Error ? cause.message : "Could not revoke the mandate"); }
+    finally { setBusy(false); }
   };
-
-  if (!overview) {
-    return (
-      <div className="page">
-        <TopBar ownerName={null} />
-        <main className="loading">
-          {error ? (
-            <p className="glass banner" role="alert">
-              {error}
-            </p>
-          ) : (
-            <p className="quiet">Loading your account…</p>
-          )}
-        </main>
-      </div>
-    );
-  }
-
-  const { account, mandates: shoppers, sellers: stores, catalog, owner } = overview;
-  const active = shoppers.filter((shopper) => shopper.status === "active");
-  const stopped = shoppers.filter((shopper) => shopper.status === "revoked");
-  const paidToday = activity.filter((item) => item.kind === "paid" && isToday(item.at));
-  const blockedToday = activity.filter((item) => item.kind === "declined" && isToday(item.at));
-  const spentToday = paidToday
-    .filter((item) => item.token.id === account.token.id)
-    .reduce((total, item) => total + BigInt(item.amount), 0n);
-  const balance = moneyParts(account.balance, account.token);
-
-  return (
-    <div className="page">
-      <TopBar ownerName={owner.name} />
-
-      <main>
-        <h1 className="sr-only">Your account</h1>
-        {error && (
-          <p className="glass banner" role="alert">
-            {error}
-          </p>
-        )}
-
-        <section className="hero" aria-label="Balance">
-          <p className="hero-label">Available</p>
-          <p className="hero-balance">
-            {balance.lead}
-            <span className="cents">{balance.tail}</span>
-          </p>
-          <p className="glass capsule">
-            <span>{money(spentToday.toString(), account.token)} spent today</span>
-            {blockedToday.length > 0 && (
-              <>
-                <span className="capsule-dot" aria-hidden="true" />
-                <span className="capsule-blocked">{blockedToday.length} blocked</span>
-              </>
-            )}
-          </p>
-        </section>
-
-        <section aria-labelledby="shoppers-heading">
-          <div className="section-head">
-            <div>
-              <h2 id="shoppers-heading">Shoppers</h2>
-              <p className="quiet">Each one spends only what you allow, and only at trusted stores.</p>
-            </div>
-            <button className="button is-lens" onClick={() => setAdding(true)}>
-              <PlusIcon size={18} /> New shopper
-            </button>
-          </div>
-
-          {active.length === 0 ? (
-            <div className="glass empty-card">
-              <p className="empty-title">Add your first shopper</p>
-              <p className="quiet">Give it a name and a limit, and it can buy things for you within that limit.</p>
-            </div>
-          ) : (
-            <div className="shopper-grid">
-              {active.map((shopper, index) => (
-                <ShopperCard
-                  key={shopper.ruleId}
-                  shopper={shopper}
-                  tone={index}
-                  catalog={catalog}
-                  busyLabel={busy[shopper.ruleId] ?? null}
-                  onPurchase={(item) => void purchase(shopper, item)}
-                  onStop={() => void stop(shopper)}
-                />
-              ))}
-            </div>
-          )}
-
-          {stopped.length > 0 && (
-            <p className="stopped">
-              <span className="stopped-label">Stopped</span>
-              {stopped.map((shopper) => shopper.name).join(", ")}
-            </p>
-          )}
-        </section>
-
-        <div className="columns">
-          <section className="glass panel is-list" aria-labelledby="latest-heading">
-            <h2 id="latest-heading">Latest</h2>
-            <ActivityList
-              items={showAll ? activity : activity.slice(0, LATEST_ROWS)}
-              freshIds={freshIds}
-              onOpen={setOpenItem}
-            />
-            {!showAll && activity.length > LATEST_ROWS && (
-              <button className="show-all" onClick={() => setShowAll(true)}>
-                Show all {activity.length}
-              </button>
-            )}
-          </section>
-
-          <aside>
-            <section className="glass panel" aria-labelledby="stores-heading">
-              <h2 id="stores-heading">Trusted stores</h2>
-              {stores.length === 0 ? (
-                <p className="quiet">No trusted stores yet.</p>
-              ) : (
-                <ul className="stores">
-                  {stores.map((store) => (
-                    <li key={store.address}>
-                      <span className="store-mark">
-                        <ShieldIcon size={18} />
-                      </span>
-                      <span>
-                        <strong>{store.name}</strong>
-                        <span className="quiet">{store.domain}</span>
-                      </span>
-                    </li>
-                  ))}
-                </ul>
-              )}
-            </section>
-
-            <section className="glass panel" aria-labelledby="protection-heading">
-              <h2 id="protection-heading">How you're protected</h2>
-              <ul className="protections">
-                <li>Shoppers never hold your money. Each one can spend only up to its limit.</li>
-                <li>Payments go to trusted stores only. Look-alikes are blocked.</li>
-                <li>You can stop a shopper at any time.</li>
-              </ul>
-            </section>
-          </aside>
+  const accounts = workspace?.accounts ?? [];
+  const account = accounts[0];
+  const title = page === "agents" ? "Agents" : page === "activity" ? "Activity" : "Mandates";
+  const subtitle = page === "agents" ? "Identify the agents associated with your account." : page === "activity" ? "Follow your account funding and payments."
+    : "Give people and agents permission to spend from your main account.";
+  return <div className="page payment-page">
+    <header className="glass topbar"><a className="brand" href="/"><Logo />Mandate</a><div className="topbar-side"><a className="button" href="/pay">Pay</a><span className="pill">{network?.name ?? "Connecting…"}</span>{workspace && <><span className="owner"><span className="owner-avatar" aria-hidden="true">{initials(workspace.customer.name)}</span><span className="owner-name">{workspace.customer.name}</span></span><button className="button is-quiet" disabled={busy} onClick={() => void logout()}>Sign out</button></>}<ThemeToggle /></div></header>
+    {error && <p className="banner is-bad" role="alert">{error} <button className="button is-quiet" onClick={() => void refresh()}>Retry</button></p>}
+    {loading ? <p className="loading muted">Loading your workspace…</p> : !workspace ? <SignIn onSignedIn={refresh} /> : <main>
+      {account && <section className="hero main-account" aria-label="Main account">
+        <div className="main-account-summary">
+          <div><p className="eyebrow">Main account · {workspace.customer.name}</p><h2 className="balance hero-balance">{money(account.balance, account.currency)}</h2><Verification account={account} /><p className="muted">Your mandates spend from this balance.</p></div>
+          <div className="main-account-stats"><p className="eyebrow">Active mandates</p><p className="parent-amount">{workspace.mandates.filter(mandate => mandate.status === "active").length}</p></div>
+          <div className="account-buttons"><button className="button is-primary" onClick={() => setAction({ kind: "fund", account })}>Add funds</button><button className="button" onClick={() => setAction({ kind: "pay", account })}>Make payment</button></div>
         </div>
-
-        <p className="footnote">Running on the Stellar test network</p>
-      </main>
-
-      {adding && <NewShopper token={account.token} onCreate={addShopper} onClose={() => setAdding(false)} />}
-      {openItem && (
-        <ReceiptDialog
-          item={openItem}
-          shopper={shoppers.find((shopper) => shopper.ruleId === openItem.agent.ruleId)}
-          ownerName={owner.name}
-          onClose={() => setOpenItem(null)}
-        />
-      )}
-
-      <div className="toasts" role="status" aria-live="polite">
-        {toasts.map((entry) => (
-          <p key={entry.id} className={`glass toast is-${entry.kind}`}>
-            {entry.text}
-          </p>
-        ))}
-      </div>
-    </div>
-  );
+        <SmartAccountAddress address={account.address ?? account.id} />
+        {account.explorerUrl && <a className="transaction-link" href={account.explorerUrl} target="_blank" rel="noreferrer">View account on Stellar ↗</a>}
+        <p className="workspace-note">Share this address to receive payments.</p>
+      </section>}
+      <nav className="glass workspace-tabs" aria-label="Workspace"><a href="/agents" aria-current={page === "agents" ? "page" : undefined}>Agents <span>{workspace.agents.length}</span></a><a href="/mandates" aria-current={page === "mandates" ? "page" : undefined}>Mandates <span>{workspace.mandates.length}</span></a><a href="/activity" aria-current={page === "activity" ? "page" : undefined}>Activity</a></nav>
+      <div className="section-header"><div className="page-title"><h1>{title}</h1><p className="muted">{subtitle}</p></div>{page === "mandates" && <button className="button is-primary" onClick={() => setCreatingMandate(true)}><PlusIcon /> New mandate</button>}</div>
+      {page === "agents" && <Agents agents={workspace.agents} onDone={refresh} />}
+      {page === "mandates" && <div className="mandates-layout"><section className="mandates-list-section">{workspace.mandates.length === 0 ? <p className="card empty">No mandates yet. Create one to share spending access to your account.</p> : <ul className="mandate-card-list">{workspace.mandates.map((mandate, index) => {
+        const source = workspace.accounts.find(account => account.id === mandate.accountId);
+        return <MandateCard key={mandate.reference} mandate={mandate} tone={index}><p className="muted">Source: {source?.name ?? mandate.accountId}</p><p className="parent-amount">{formatValue(mandate.spent, mandate.currency ?? source?.currency)} / {money(mandate.limit, mandate.currency ?? source?.currency)}</p><p className="muted">Per {mandate.period === "month" ? "30 days" : mandate.period === "week" ? "7 days" : "24 hours"} · expires {new Date(mandate.expiresAt).toLocaleDateString()}</p><p className="muted">Holder: {mandate.recipient}</p><p className="muted">Allowed seller IDs: {mandate.sellerIds?.length ? mandate.sellerIds.join(", ") : "Any verified seller"}</p><div className="account-buttons"><a className="button" href="/pay">Open Pay page ↗</a>{source && <button className="button" onClick={() => setAction({ kind: "fund", account: source })}>Fund source account</button>}</div><SecretMandateId key={mandate.reference} reference={mandate.reference} />{(mandate.status === "active" || mandate.chainRevocationPending) && (confirmRevoke === mandate.reference ? <div className="confirm"><span>Revoke access?</span><button className="button is-danger" disabled={busy} onClick={() => void revoke(mandate.reference)}>Revoke</button><button className="button" disabled={busy} onClick={() => setConfirmRevoke(null)}>Cancel</button></div> : <button className="button is-quiet" onClick={() => setConfirmRevoke(mandate.reference)}>{mandate.chainRevocationPending ? "Retry revocation" : "Revoke mandate"}</button>)}</MandateCard>;
+      })}</ul>}
+        {workspace.shared.length > 0 && <><h2 className="shared-heading">Shared with you</h2><ul className="mandate-card-list">{workspace.shared.map(({ account, mandate, ownerName }) => <li className="card mandate-card" key={mandate.reference}><h3>{mandate.name}</h3><p className="muted">Allowed seller IDs: {mandate.sellerIds?.length ? mandate.sellerIds.join(", ") : "Any verified seller"}</p><p className="muted">{account.name} · shared by {ownerName}</p><p>{formatValue(mandate.spent, mandate.currency ?? account.currency)} / {money(mandate.limit, mandate.currency ?? account.currency)}</p><button className="button" disabled={mandate.status !== "active" || mandate.currency !== "USD"} onClick={() => setAction({ kind: "pay", account, mandate })}>Make payment</button></li>)}</ul></>}
+      </section></div>}
+      {page === "activity" && <Activity items={workspace.activity} accounts={workspace.accounts} agents={workspace.agents} />}
+      <footer className="workspace-footer">Choose FIAT or Testnet when adding funds. All payments use demo USD on Stellar testnet. A mandate grants spending access to your main account.</footer>
+    </main>}
+    {workspace && creatingMandate && <NewMandate workspace={workspace} onDone={refresh} onClose={() => setCreatingMandate(false)} />}
+    {workspace && action && <AccountForms key={JSON.stringify(action)} action={action} onDone={refresh} onClose={() => setAction(null)} />}
+  </div>;
 }
 
-type Theme = "light" | "dark";
-
-/** Dark unless the owner picked light with the toggle. */
-function useTheme(): [Theme, () => void] {
-  const [theme, setTheme] = useState<Theme>(() =>
-    document.documentElement.dataset.theme === "light" ? "light" : "dark",
-  );
-
-  const toggle = () => {
-    const next: Theme = theme === "dark" ? "light" : "dark";
-    document.documentElement.dataset.theme = next;
-    try {
-      localStorage.setItem("theme", next);
-    } catch {
-      // Storage can be blocked; the choice then lasts until reload.
-    }
-    setTheme(next);
-  };
-
-  return [theme, toggle];
+function Verification({ account }: { account: SpendingAccount }) {
+  return <p className={account.verified ? "verified account-verification" : "form-error account-verification"}>{account.verified ? `✓ Verified recipient · on-chain registry` : "Unverified account"}</p>;
 }
-
-function TopBar({ ownerName }: { ownerName: string | null }) {
-  const [theme, toggleTheme] = useTheme();
-  const next = theme === "dark" ? "light" : "dark";
-  return (
-    <header className="glass topbar">
-      <a className="brand" href="/">
-        <Logo />
-        mandate
-      </a>
-      <div className="topbar-side">
-        {ownerName && <span className="owner-name">{ownerName}</span>}
-        <button
-          type="button"
-          className="icon-button is-plain"
-          onClick={toggleTheme}
-          aria-label={`Switch to ${next} mode`}
-          title={`Switch to ${next} mode`}
-        >
-          {theme === "dark" ? <SunIcon size={20} /> : <MoonIcon size={20} />}
-        </button>
-      </div>
-    </header>
-  );
+function Activity({ items, accounts, agents }: { items: PaymentEntry[]; accounts: SpendingAccount[]; agents: AccountAgent[] }) {
+  return <section className="card">{items.length === 0 ? <p className="empty">Funding and payments will appear here.</p> : <ul className="ledger-list">{items.map(entry => <li key={entry.id}><span className="ledger-symbol" aria-hidden="true">{entry.kind === "funding" ? "+" : "↗"}</span><div className="ledger-main"><strong>{entry.kind === "funding" ? `Account funded · ${entry.source === "Stellar testnet funding" ? "Testnet" : "FIAT"}` : entry.reference}</strong><p className="muted">{accounts.find(account => account.id === entry.accountId)?.name ?? "Previous account activity"}</p>{entry.agentId && <p className="muted">Agent: {agents.find(agent => agent.id === entry.agentId)?.name ?? entry.agentId} · {entry.agentId}</p>}{entry.kind === "payment" && <SmartAccountAddress address={entry.destination} label="Recipient Smart Account address" />}<small className="muted">{new Date(entry.createdAt).toLocaleString()} · {entry.settlement === "traditional-demo" ? "Banking demo · simulated" : "Stellar testnet"}{entry.mandateReference ? " · Via mandate" : ""}</small>{entry.explorerUrl && <p><a className="transaction-link" href={entry.explorerUrl} target="_blank" rel="noreferrer">View transaction ↗</a></p>}</div><strong className="ledger-amount">{money(entry.amount, entry.currency)}</strong></li>)}</ul>}</section>;
 }

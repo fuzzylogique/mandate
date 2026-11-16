@@ -3,15 +3,23 @@
   "private": true,
   "type": "module",
   "packageManager": "pnpm@12.18.0",
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
-    "typecheck": "pnpm -r typecheck",
-    "setup:testnet": "node scripts/setup-testnet.ts",
-    "dev:merchant": "pnpm --filter @mandate/merchant dev",
-    "dev:facilitator": "pnpm --filter @mandate/facilitator dev",
-    "dev:receipts": "pnpm --filter @mandate/receipts dev",
+    "dev": "pnpm -r --parallel --filter @mandate/web --filter @mandate/receipts dev",
     "dev:web": "pnpm --filter @mandate/web dev",
-    "agent": "pnpm --filter @mandate/agent start"
+    "dev:receipts": "pnpm --filter @mandate/receipts dev",
+    "setup:payments": "node scripts/setup-payments.ts",
+    "setup:contracts": "node scripts/deploy-contracts.ts",
+    "typecheck": "tsc -p . && pnpm -r typecheck",
+    "test": "pnpm --filter @mandate/receipts test && pnpm --filter @mandate/langchain test",
+    "pay:langchain": "pnpm --filter @mandate/langchain pay",
+    "agent:langchain": "pnpm --filter @mandate/langchain agent",
+    "test:chain": "node --env-file=.env scripts/test-live-payments.ts",
+    "test:contracts": "cargo test --manifest-path contracts/Cargo.toml --workspace",
+    "build": "pnpm --filter @mandate/web build",
+    "test:ui": "pnpm --filter @mandate/web test:ui"
   },
   "dependencies": {
     "@stellar/stellar-sdk": "^16.4.1"

@@ -1,4 +1,4 @@
-// Everything your shoppers did with your money: what they paid, and what was blocked.
+// Everything your mandates did with your money: what they paid, and what was blocked.
 import SwiftUI
 
 struct ActivityView: View {
@@ -18,7 +18,7 @@ struct ActivityView: View {
                     .padding(.top, 8)
 
                 if store.activity.isEmpty {
-                    Text("Purchases your shoppers make will show up here, each with its receipt.")
+                    Text("Purchases your mandates make will show up here, each with its receipt.")
                         .font(.system(size: 15))
                         .foregroundStyle(Color.soft)
                         .padding(20)

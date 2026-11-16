@@ -1,0 +1,99 @@
+{
+  "fundingTransactions": {
+    "amount": "5",
+    "depositTxHash": "a65973e8b9dc84f170109b7208092378471c6e9fa24ffd9c0f5fb019727b7e41",
+    "forwardingTxHash": "045ee3a6112ccfeccca95d52509169a03f0852027a596dfb663b68a8d8d8b895"
+  },
+  "network": "stellar:testnet",
+  "policy": "CDUOUHZNVEWW6J4ELPK6DGHGO7RGBCQ54TNSE6AOTLUTCL5GYE7FJHGQ",
+  "usdAsset": {
+    "currency": "USD",
+    "code": "USD",
+    "issuer": "GCMRUO2YXX3UWB3IBJLN4HVM6D2LXWQUEG7Z6EKMAFE3OSLF5ZKJ2B7H",
+    "tokenContract": "CBKHZW4CJ6P4Y4A5QEQSX66RKG7BBXTNFUPLQ36MUERFOGO6FMMGZ64G"
+  },
+  "traditionalAccount": {
+    "source": "CBPX6MYQKZJU3ADZIHYVMB5OTF2Y3ZPJQXIHQVKFGQJWFWBTEQFGWQ7Y",
+    "recipient": "CDYCEAK525CW54IEV2XHARFTDX4S5REMNGMWU6RHJHHMADDSJKEC63JF",
+    "paymentId": "131ba39c38c2842f6f8fc6544f9414b5b19bcae529e15726baea41c1b3f0b950"
+  },
+  "smart": "CDHXC5IGHKF46HAI4CREFVINMERAGDJTAF5BAJPPUNIWO4R2BUXWZ2PH",
+  "seller": "CBGB5UNA7ZAQNAWWKWLKATLMOMLXGD76ICOG7O7A5EPEGXWAJXHFW566",
+  "mandate": {
+    "reference": "9060fcab7332770882849c7657f2b383",
+    "account": "CDHXC5IGHKF46HAI4CREFVINMERAGDJTAF5BAJPPUNIWO4R2BUXWZ2PH"
+  },
+  "checks": [
+    "signup provisions one main account",
+    "one-to-one private mapping",
+    "direct funding without fiat ledger",
+    "single Add funds deposits then forwards",
+    "Smart to Smart payment",
+    "third-party without owner session",
+    "idempotent retry",
+    "wrong mandate ID rejected",
+    "Classic recipient rejected",
+    "unverified Smart recipient rejected",
+    "spending limit enforced on chain",
+    "revocation enforced on chain",
+    "USD mandate cannot authorize XLM with sufficient XLM balance",
+    "USD mandate to Stellar account",
+    "USD-only balances and mandates for both account options",
+    "unknown agent ID rejected",
+    "agent ID from another account rejected",
+    "registered agent identity authorized by deployed verifier"
+  ],
+  "receipts": [
+    {
+      "step": "Traditional USD payment",
+      "txHash": "131ba39c38c2842f6f8fc6544f9414b5b19bcae529e15726baea41c1b3f0b950"
+    },
+    {
+      "step": "Smart opening",
+      "txHash": "4e8cd59d634e5fc07f8f776709d3eb9bcf60f7d418a1ba1c00d5b96c8ed3e049"
+    },
+    {
+      "step": "Smart verification",
+      "txHash": "03eb23e6d8820b5e85043663d34566c215144ffe5e35213b5b73ca96e6b2aeff"
+    },
+    {
+      "step": "Seller opening",
+      "txHash": "6fab9b363828b360f9f947f735842bd65c64284e8bd097e2d2afd41402b8a27b"
+    },
+    {
+      "step": "Seller verification",
+      "txHash": "a7bd0f2c4fbc00237463af18feb93738e61a9f013accc5174f0de799b377fa88"
+    },
+    {
+      "step": "Agent registration",
+      "txHash": "fe58d20233a67af13d8a79234d03c013c4559d511017b17b2a95e4e977118c21"
+    },
+    {
+      "step": "Fund smart",
+      "txHash": "045ee3a6112ccfeccca95d52509169a03f0852027a596dfb663b68a8d8d8b895"
+    },
+    {
+      "step": "Smart-to-Smart payment",
+      "txHash": "bdec4d8497154ed73da4c5e0db1221203c7e75850fa0c4ac82cf0d14ab0c5d70"
+    },
+    {
+      "step": "Third-party /pay payment",
+      "txHash": "26e503e068aa241a303881b179d7586f9f7f3a94778e0eb4e45e55392a019324"
+    },
+    {
+      "step": "USD mandate to Stellar account",
+      "txHash": "54c8e80958197448c165ca1422be559fe2a430e1eeb869a313ce8da691fc70c2"
+    },
+    {
+      "step": "Stellar account spends received USD",
+      "txHash": "d8af74457ea60410d9d17bd49dd78a6a083db635e7ce4c28520a670a0c932f5d"
+    }
+  ],
+  "agentVerification": {
+    "registry": "CA65OTVACIYOCU7AX2ZTOX4VHUAKHEERIZ26M6JC6TCH65MZ3KNWS67U",
+    "verifier": "CAEAVLBWX36V4DCJG5H3ZZGQ2XPXV4NBZZ7WI6KDKTOMJB5MIZMROITI",
+    "agentId": "agt_7ed105a7332321b5d5f12c40ac5374fc",
+    "account": "CDHXC5IGHKF46HAI4CREFVINMERAGDJTAF5BAJPPUNIWO4R2BUXWZ2PH",
+    "registrationTxHash": "fe58d20233a67af13d8a79234d03c013c4559d511017b17b2a95e4e977118c21"
+  }
+}

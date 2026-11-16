@@ -6,24 +6,33 @@ interface DialogProps {
   title: string;
   onClose: () => void;
   children: ReactNode;
-  /** "sheet" is one glass panel; "bare" leaves the glass to the content (the receipt). */
+  /** Extra class on the dialog panel. */
+  className?: string;
   variant?: "sheet" | "bare";
 }
 
-export function Dialog({ title, onClose, children, variant = "sheet" }: DialogProps) {
+export function Dialog({ title, onClose, children, className, variant = "sheet" }: DialogProps) {
   const panel = useRef<HTMLDivElement>(null);
-  // The latest onClose, without re-running the effect below on every render.
   const close = useRef(onClose);
   close.current = onClose;
 
   useEffect(() => {
+    const previousFocus = document.activeElement as HTMLElement | null;
     const onKey = (event: KeyboardEvent) => {
       if (event.key === "Escape") close.current();
+      if (event.key === "Tab") {
+        const elements = panel.current?.querySelectorAll<HTMLElement>('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea, a[href], [tabindex="0"]');
+        if (!elements?.length) { event.preventDefault(); return; }
+        const first = elements[0]!;
+        const last = elements[elements.length - 1]!;
+        if (event.shiftKey && (document.activeElement === first || document.activeElement === panel.current)) { event.preventDefault(); last.focus(); }
+        else if (!event.shiftKey && (document.activeElement === last || document.activeElement === panel.current)) { event.preventDefault(); first.focus(); }
+      }
     };
     document.addEventListener("keydown", onKey);
-    // Keep keyboard focus inside the dialog from the start, unless a field already took it.
-    if (!panel.current?.contains(document.activeElement)) panel.current?.focus();
-    return () => document.removeEventListener("keydown", onKey);
+    // Keep keyboard focus inside the dialog from the start.
+    panel.current?.focus();
+    return () => { document.removeEventListener("keydown", onKey); previousFocus?.focus(); };
   }, []);
 
   return (
@@ -35,18 +44,17 @@ export function Dialog({ title, onClose, children, variant = "sheet" }: DialogPr
     >
       <div
         ref={panel}
-        className={`dialog is-${variant}`}
+        className={`dialog is-${variant} ${className ?? ""}`}
         role="dialog"
         aria-modal="true"
         aria-label={title}
         tabIndex={-1}
       >
         <header className="dialog-header">
-          <button className="icon-button" onClick={onClose} aria-label="Close">
-            <CloseIcon size={20} />
-          </button>
           <h2>{title}</h2>
-          <span className="dialog-header-spacer" aria-hidden="true" />
+          <button className="icon-button" onClick={onClose} aria-label="Close">
+            <CloseIcon size={18} />
+          </button>
         </header>
         {children}
       </div>

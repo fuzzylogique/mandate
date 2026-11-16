@@ -1,4 +1,4 @@
-// Mandate for iPhone: see what your shoppers spend, and decide what they may.
+// Mandate for iPhone: see what your mandates spend, and decide what they may.
 import SwiftUI
 
 @main
@@ -17,7 +17,7 @@ struct MandateApp: App {
 }
 
 enum AppTab: Hashable {
-    case home, shoppers, activity, you
+    case home, mandates, activity, you
 }
 
 struct RootView: View {
@@ -29,8 +29,8 @@ struct RootView: View {
             Tab("Home", systemImage: "house", value: AppTab.home) {
                 HomeView(tab: $tab)
             }
-            Tab("Shoppers", systemImage: "person.2", value: AppTab.shoppers) {
-                ShoppersView()
+            Tab("Mandates", systemImage: "person.2", value: AppTab.mandates) {
+                MandatesView()
             }
             Tab("Activity", systemImage: "list.bullet", value: AppTab.activity) {
                 ActivityView()
@@ -39,6 +39,7 @@ struct RootView: View {
                 YouView()
             }
         }
+        .sheet(isPresented: Binding(get: { store.requiresSignIn }, set: { _ in })) { AccountSignInView().interactiveDismissDisabled() }
         .showsBanner()
         .sensoryFeedback(trigger: store.banner) { _, banner in
             guard let banner else { return nil }
@@ -70,7 +71,7 @@ extension View {
     func showsBanner() -> some View { modifier(BannerOverlay()) }
 }
 
-/// The notice that drops in when a shopper pays or is blocked.
+/// The notice that drops in when a mandate pays or is blocked.
 struct BannerView: View {
     let banner: Banner
 

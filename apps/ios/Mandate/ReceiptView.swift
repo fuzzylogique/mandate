@@ -12,10 +12,10 @@ struct ReceiptView: View {
     }
 
     private var ruleLine: String {
-        guard let shopper = store.shopper(item.agent.ruleId), shopper.isActive,
-              let limit = shopper.limitMoney, let left = shopper.leftMoney
-        else { return "Since stopped" }
-        return "\(limit.short) a \(shopper.period ?? "day"), \(left.short) left"
+        guard let mandate = store.mandate(item.agent.ruleId), mandate.isActive,
+              let limit = mandate.limitMoney, let left = mandate.leftMoney
+        else { return item.isFunding ? "Account funding" : item.agent.ruleId < 0 ? "Owner payment" : "Since stopped" }
+        return "\(limit.short) a \(mandate.period ?? "day"), \(left.short) left"
     }
 
     var body: some View {
@@ -24,7 +24,7 @@ struct ReceiptView: View {
             ScrollView {
                 VStack(spacing: 22) {
                     ZStack {
-                        Text(item.blocked ? "Blocked payment" : "Receipt")
+                        Text(item.isFunding ? "Funding receipt" : item.blocked ? "Blocked payment" : "Receipt")
                             .font(.system(size: 16, weight: .medium))
                         HStack {
                             Button { dismiss() } label: {
@@ -70,7 +70,7 @@ struct ReceiptView: View {
 
             VStack(spacing: 0) {
                 row("For", item.item)
-                row(item.blocked ? "Tried by" : "Paid by", item.agent.name)
+                row(item.isFunding ? "Added by" : item.blocked ? "Tried by" : "Paid by", item.agent.name)
                 row(item.blocked ? "On behalf of" : "Allowed by", store.overview?.owner.name ?? "You")
                 row("Under the rule", ruleLine)
             }
@@ -97,7 +97,7 @@ struct ReceiptView: View {
             Text(item.seller.name)
                 .font(.system(size: 17, weight: .medium))
                 .padding(.top, 10)
-            Label(item.seller.verified ? "Trusted store" : "Not a trusted store",
+            Label(item.isFunding ? "Account funding" : item.seller.verified ? "Trusted store" : "Not a trusted store",
                   systemImage: item.seller.verified ? "checkmark.shield" : "exclamationmark.shield")
                 .font(.system(size: 13))
                 .foregroundStyle(item.seller.verified ? Color.trusted : Color.blocked)
@@ -131,7 +131,7 @@ struct ReceiptView: View {
             ZStack {
                 Circle().fill(
                     AngularGradient(
-                        colors: [.glow, .shopper(1), .shopper(2), .shopper(4), .trusted, .glow],
+                        colors: [.glow, .mandate(1), .mandate(2), .mandate(4), .trusted, .glow],
                         center: .center,
                         angle: .degrees(40)
                     )
@@ -141,7 +141,7 @@ struct ReceiptView: View {
                     .font(.system(size: 20, weight: .bold))
             }
             .frame(width: 68, height: 68)
-            .shadow(color: Color.shopper(1).opacity(0.6), radius: 11)
+            .shadow(color: Color.mandate(1).opacity(0.6), radius: 11)
             .accessibilityHidden(true)
 
             VStack(alignment: .leading, spacing: 3) {

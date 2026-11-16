@@ -5,7 +5,7 @@ struct HomeView: View {
     @Environment(AppStore.self) private var store
     @Binding var tab: AppTab
     @State private var adding = false
-    @State private var openShopper: Shopper?
+    @State private var openMandate: Mandate?
     @State private var openReceipt: Activity?
 
     var body: some View {
@@ -24,15 +24,15 @@ struct HomeView: View {
 
                 if let balance = store.balance {
                     summary(balance)
-                    shoppers
+                    mandates
                     latest
                 } else {
                     waiting
                 }
             }
         }
-        .fullScreenCover(isPresented: $adding) { NewShopperView() }
-        .sheet(item: $openShopper) { ShopperDetail(shopperID: $0.id) }
+        .fullScreenCover(isPresented: $adding) { NewMandateView() }
+        .sheet(item: $openMandate) { MandateDetail(mandateID: $0.id) }
         .sheet(item: $openReceipt) { ReceiptView(item: $0) }
     }
 
@@ -60,10 +60,10 @@ struct HomeView: View {
         .padding(.top, 26)
     }
 
-    private var shoppers: some View {
+    private var mandates: some View {
         VStack(spacing: 10) {
             HStack {
-                Text("Shoppers")
+                Text("Mandates")
                     .font(.system(size: 18, weight: .semibold))
                 Spacer()
                 Button { adding = true } label: {
@@ -72,18 +72,18 @@ struct HomeView: View {
                         .frame(width: 44, height: 44)
                 }
                 .glassEffect(.regular.interactive(), in: .circle)
-                .accessibilityLabel("New shopper")
+                .accessibilityLabel("New mandate")
             }
 
-            if store.shoppers.isEmpty {
+            if store.mandates.isEmpty {
                 VStack(alignment: .leading, spacing: 14) {
                     Text("Let someone shop for you")
                         .font(.system(size: 20, weight: .medium))
-                    Text("Give a shopper a limit. It can spend up to that, at trusted stores only, and you see every purchase.")
+                    Text("Give a mandate a limit. It can spend up to that, at trusted stores only, and you see every purchase.")
                         .font(.system(size: 14))
                         .foregroundStyle(Color.soft)
                         .fixedSize(horizontal: false, vertical: true)
-                    Button("New shopper") { adding = true }
+                    Button("New mandate") { adding = true }
                         .buttonStyle(LensButtonStyle(height: 52))
                 }
                 .padding(20)
@@ -92,8 +92,8 @@ struct HomeView: View {
             } else {
                 ScrollView(.horizontal) {
                     HStack(spacing: 12) {
-                        ForEach(store.shoppers) { shopper in
-                            Button { openShopper = shopper } label: { ShopperCard(shopper: shopper) }
+                        ForEach(store.mandates) { mandate in
+                            Button { openMandate = mandate } label: { MandateCard(mandate: mandate) }
                                 .buttonStyle(.plain)
                         }
                     }
@@ -150,21 +150,21 @@ struct HomeView: View {
     }
 }
 
-/// One shopper as a glass card: how much is left of its limit.
-struct ShopperCard: View {
+/// One mandate as a glass card: how much is left of its limit.
+struct MandateCard: View {
     @Environment(AppStore.self) private var store
-    let shopper: Shopper
+    let mandate: Mandate
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            Ring(share: shopper.leftShare, color: .shopper(shopper.id))
+            Ring(share: mandate.leftShare, color: .mandate(mandate.id))
                 .frame(width: 46, height: 46)
                 .padding(3)
-            Text(shopper.name)
+            Text(mandate.name)
                 .font(.system(size: 15, weight: .medium))
                 .padding(.top, 12)
             HStack(alignment: .firstTextBaseline, spacing: 5) {
-                Text(shopper.leftMoney?.short ?? "")
+                Text(mandate.leftMoney?.short ?? "")
                     .font(.system(size: 24, weight: .medium))
                     .tracking(-0.8)
                 Text("left")
@@ -172,7 +172,7 @@ struct ShopperCard: View {
                     .foregroundStyle(Color.soft)
             }
             .minimumScaleFactor(0.6)
-            Text(store.working[shopper.id] ?? shopper.allowance)
+            Text(store.working[mandate.id] ?? mandate.allowance)
                 .font(.system(size: 12))
                 .foregroundStyle(Color.soft)
         }

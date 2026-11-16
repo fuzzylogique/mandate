@@ -53,15 +53,19 @@ struct YouView: View {
 
                 heading("How you're protected")
                 VStack(alignment: .leading, spacing: 14) {
-                    point("lock", "Shoppers never hold your money. Each one can only spend up to its limit.")
+                    point("lock", "Mandates never hold your money. Each one can only spend up to its limit.")
                     point("checkmark.shield", "Payments only go to trusted stores. Look-alikes are refused.")
-                    point("hand.raised", "You can stop a shopper at any time.")
+                    point("hand.raised", "You can stop a mandate at any time.")
                     point("doc.text", "Every purchase leaves a receipt that can't be edited.")
                 }
                 .padding(18)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .glassPanel()
 
+                if store.overview != nil {
+                    Button("Sign out") { Task { do { try await store.signOut() } catch { store.problem = error.localizedDescription } } }
+                        .buttonStyle(LensButtonStyle(height: 48))
+                }
                 heading("Connection")
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Mandate service address")
@@ -121,5 +125,47 @@ struct YouView: View {
                 .font(.system(size: 14))
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+}
+
+
+struct AccountSignInView: View {
+    @Environment(AppStore.self) private var store
+    @State private var registering = false
+    @State private var name = ""
+    @State private var email = ""
+    @State private var password = ""
+    @State private var address = ""
+    @State private var busy = false
+    @State private var problem: String?
+
+    var body: some View {
+        Screen {
+            VStack(alignment: .leading, spacing: 20) {
+                Text(registering ? "Create your account" : "Sign in to Mandate")
+                    .font(.system(size: 28, weight: .semibold)).padding(.top, 36)
+                Text("Your main account, mandates and activity are shared with the web dashboard.")
+                    .foregroundStyle(Color.soft)
+                if registering { TextField("Your name", text: $name).textContentType(.name) }
+                TextField("Email", text: $email).keyboardType(.emailAddress).textContentType(.emailAddress).textInputAutocapitalization(.never)
+                SecureField("Password", text: $password).textContentType(registering ? .newPassword : .password)
+                TextField("Service address", text: $address).keyboardType(.URL).textInputAutocapitalization(.never).autocorrectionDisabled()
+                if let problem { Text(problem).foregroundStyle(Color.blocked) }
+                Button(busy ? "Please wait…" : registering ? "Create account" : "Sign in") {
+                    Task {
+                        busy = true; problem = nil
+                        store.serviceAddress = address.trimmingCharacters(in: .whitespaces)
+                        do { try await store.signIn(name: registering ? name : nil, email: email, password: password) }
+                        catch { problem = error.localizedDescription }
+                        busy = false
+                    }
+                }
+                .buttonStyle(LensButtonStyle()).disabled(busy || email.isEmpty || password.isEmpty || address.isEmpty || (registering && name.isEmpty))
+                Button(registering ? "Already have an account? Sign in" : "Create an account") { registering.toggle(); problem = nil }
+                    .disabled(busy)
+            }
+            .padding(24).glassPanel()
+        }
+        .onAppear { address = store.serviceAddress }
     }
 }

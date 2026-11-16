@@ -1,0 +1,73 @@
+{
+  "fundingTransactions": {
+    "amount": "5",
+    "depositTxHash": "0fdfa02a07474d2c660cd89d8c363a0df7137c5fcbffcacdbc90c64aef444d75",
+    "forwardingTxHash": "faecab37eb0640cb5c915de63fb34330b017489a48b39a15beec27dceb4910c4"
+  },
+  "network": "stellar:testnet",
+  "policy": "CDUOUHZNVEWW6J4ELPK6DGHGO7RGBCQ54TNSE6AOTLUTCL5GYE7FJHGQ",
+  "privatePairs": [
+    {
+      "accountId": "STELLAR_2a0eaeba40967a7c9397ea7604bc4380",
+      "classicAddress": "GBFAYXQA3EGVKIRSKJI2G7ELS2OZNJRTIZ4S3QEE2ELHSNE4NIFQ5TRD"
+    },
+    {
+      "accountId": "STELLAR_d95fb9dd62ea791b751f4f0cf15228c0",
+      "classicAddress": "GD334PPQXHAZPDOJDHC7POVESVUKHIGZK3JGDXD6SF5COR3OPTYKX3CR"
+    }
+  ],
+  "traditionalDemo": {
+    "source": "BANK_DEMO_E46FD6A1650B8AE44808",
+    "recipient": "BANK_DEMO_95F012AC9FAAFF938052",
+    "paymentId": "demo_f3634fea-fb96-404a-b21c-14fa52950326"
+  },
+  "smart": "CBW2F3I4K4XI7ZP4UDNJESUXKQU2ATTYQXALYYURJWG3MRZJM6MFZSQ2",
+  "seller": "CBSOWF4WTN6S2WDE6Y3QBQFFPA2JDBNKWSKKRTHYNCK63GNA22BDSITS",
+  "mandate": {
+    "id": "86cc6f493966c68daacddaa8e2f3cd2c",
+    "account": "CBW2F3I4K4XI7ZP4UDNJESUXKQU2ATTYQXALYYURJWG3MRZJM6MFZSQ2"
+  },
+  "checks": [
+    "login holds no funds",
+    "one-to-one private mapping",
+    "single Add funds deposits then forwards",
+    "Smart to Smart payment",
+    "third-party without owner session",
+    "idempotent retry",
+    "wrong credential rejected",
+    "Classic recipient rejected",
+    "unverified Smart recipient rejected",
+    "spending limit enforced on chain",
+    "revocation enforced on chain"
+  ],
+  "receipts": [
+    {
+      "step": "Smart opening",
+      "txHash": "adb13ba57953fce7ab355e1732a892bc41e358d3f264932447aad7ff76c553b0"
+    },
+    {
+      "step": "Smart verification",
+      "txHash": "8d7bf51c0f973739708b72668149092a293c8ae5ca0f5882c0896b627c041222"
+    },
+    {
+      "step": "Seller opening",
+      "txHash": "df549fe107a9aba403ad24d25ace6dcb912ed5711ed9768c01dbb09417c2f769"
+    },
+    {
+      "step": "Seller verification",
+      "txHash": "f02ff60ab82b5fc4cf08238e7ddf64e72490825c7ab1aacd35c2a2f2e5ffc31e"
+    },
+    {
+      "step": "Fund smart",
+      "txHash": "faecab37eb0640cb5c915de63fb34330b017489a48b39a15beec27dceb4910c4"
+    },
+    {
+      "step": "Smart-to-Smart payment",
+      "txHash": "38de2ac4147dcfdf4802c8e47b259517686291b627166086be06cbba41d44520"
+    },
+    {
+      "step": "Third-party /pay payment",
+      "txHash": "f820b809a0cdb0f018253a72fd8453aed53edffa1e29e3696aeb94485c49b073"
+    }
+  ]
+}

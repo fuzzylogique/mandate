@@ -1,9 +1,9 @@
-// The account as the app knows it: balance, shoppers, activity, and the
+// The account as the app knows it: balance, mandates, activity, and the
 // things the owner can do. Refreshes itself every few seconds.
 import Foundation
 import Observation
 
-/// A short notice shown at the top of the screen when a shopper pays or is blocked.
+/// A short notice shown at the top of the screen when a mandate pays or is blocked.
 struct Banner: Identifiable, Equatable {
     let id = UUID()
     let blocked: Bool
@@ -20,9 +20,10 @@ final class AppStore {
     var overview: Overview?
     var activity: [Activity] = []
     /// Set when the account can't be reached.
+    var requiresSignIn = false
     var problem: String?
     var banner: Banner?
-    /// What each shopper is doing right now, by id, e.g. "Buying…".
+    /// What each mandate is doing right now, by id, e.g. "Buying…".
     var working: [Int: String] = [:]
 
     /// Where the Mandate service runs. On a real phone this is the Mac's address.
@@ -30,6 +31,7 @@ final class AppStore {
         didSet { UserDefaults.standard.set(serviceAddress, forKey: Self.addressKey) }
     }
 
+    private var sessionVersion = 0
     private var seen: Set<String>?
     private var loop: Task<Void, Never>?
 
@@ -44,8 +46,8 @@ final class AppStore {
     // MARK: Reading
 
     var token: TokenInfo? { overview?.account.token }
-    var shoppers: [Shopper] { overview?.mandates.filter(\.isActive) ?? [] }
-    var stopped: [Shopper] { overview?.mandates.filter { !$0.isActive } ?? [] }
+    var mandates: [Mandate] { overview?.mandates.filter(\.isActive) ?? [] }
+    var stopped: [Mandate] { overview?.mandates.filter { !$0.isActive } ?? [] }
 
     var balance: Money? {
         overview.map { Money(base: $0.account.balance, token: $0.account.token) }
@@ -54,7 +56,7 @@ final class AppStore {
     var spentToday: Money? {
         guard let token else { return nil }
         let total = activity
-            .filter { !$0.blocked && $0.token.id == token.id && Calendar.current.isDateInToday($0.date) }
+            .filter { $0.kind == "paid" && $0.token.id == token.id && Calendar.current.isDateInToday($0.date) }
             .reduce(Decimal(0)) { $0 + $1.money.value }
         return Money(value: total, token: token)
     }
@@ -63,12 +65,12 @@ final class AppStore {
         activity.filter { $0.blocked && Calendar.current.isDateInToday($0.date) }.count
     }
 
-    func shopper(_ id: Int) -> Shopper? {
+    func mandate(_ id: Int) -> Mandate? {
         overview?.mandates.first { $0.id == id }
     }
 
-    func activity(for shopper: Shopper) -> [Activity] {
-        activity.filter { $0.agent.ruleId == shopper.ruleId }
+    func activity(for mandate: Mandate) -> [Activity] {
+        activity.filter { $0.agent.ruleId == mandate.ruleId }
     }
 
     // MARK: Refreshing
@@ -84,13 +86,14 @@ final class AppStore {
     }
 
     func refresh() async {
+        let version = sessionVersion
         do {
-            async let nextOverview = api.overview()
-            async let nextActivity = api.activity()
-            let (newOverview, newActivity) = try await (nextOverview, nextActivity)
+            let (newOverview, newActivity) = try await api.workspace()
+            guard version == sessionVersion else { return }
             overview = newOverview
             activity = newActivity
             problem = nil
+            requiresSignIn = false
 
             // Remember what was already there on first load; announce what comes after.
             if let known = seen {
@@ -101,11 +104,29 @@ final class AppStore {
                 seen = Set(newActivity.map(\.id))
             }
         } catch {
+            guard version == sessionVersion else { return }
+            if (error as? APIError)?.status == 401 {
+                requiresSignIn = true; overview = nil; activity = []; seen = nil
+            }
             problem = error.localizedDescription
         }
     }
 
+    func signIn(name: String?, email: String, password: String) async throws {
+        try await api.signIn(name: name, email: email, password: password)
+        sessionVersion += 1
+        overview = nil; activity = []; seen = nil; requiresSignIn = false
+        await refresh()
+    }
+    func signOut() async throws {
+        try await api.signOut()
+        sessionVersion += 1
+        overview = nil; activity = []; seen = nil; requiresSignIn = true
+    }
+    func reveal(_ mandate: Mandate) async throws -> String { try await api.reveal(reference: mandate.reference) }
+
     private func announce(_ item: Activity) {
+        if item.isFunding { return }
         let next = item.blocked
             ? Banner(blocked: true, title: "Blocked: \(item.seller.name)", detail: "\(item.reason ?? "Blocked"). Nothing was paid.")
             : Banner(blocked: false, title: "\(item.agent.name) paid \(item.seller.name)", detail: "\(item.money.text) for \(item.item.lowercased())")
@@ -118,31 +139,20 @@ final class AppStore {
 
     // MARK: Actions
 
-    func create(name: String, limit: String, period: String) async throws {
-        _ = try await api.createShopper(name: name, limit: limit, period: period)
+    func create(name: String, limit: String, period: String, expiresAt: String, requestId: String) async throws {
+        _ = try await api.createMandate(name: name, limit: limit, period: period, expiresAt: expiresAt, requestId: requestId)
         await refresh()
     }
 
-    func stop(_ shopper: Shopper) async {
-        working[shopper.id] = "Stopping…"
+    func stop(_ mandate: Mandate) async {
+        working[mandate.id] = "Stopping…"
         do {
-            try await api.stop(ruleId: shopper.ruleId)
+            try await api.stop(reference: mandate.reference)
         } catch {
             problem = error.localizedDescription
         }
-        working[shopper.id] = nil
+        working[mandate.id] = nil
         await refresh()
     }
 
-    /// Sends a shopper to buy one thing. The result shows up as a notice and in activity.
-    func send(_ shopper: Shopper, toBuy item: CatalogItem) async {
-        working[shopper.id] = "Buying \(item.title.lowercased())…"
-        do {
-            _ = try await api.purchase(ruleId: shopper.ruleId, itemId: item.id)
-        } catch {
-            problem = error.localizedDescription
-        }
-        working[shopper.id] = nil
-        await refresh()
-    }
 }

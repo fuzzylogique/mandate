@@ -5,7 +5,9 @@ members = [
     "ed25519-verifier",
     "spending-limit-policy",
     "seller-registry",
-    "verified-seller-policy",
+    "agent-registry",
+    "agent-verifier",
+    "verified-smart-policy",
 ]
 
 [workspace.package]
