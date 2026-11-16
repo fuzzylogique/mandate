@@ -96,6 +96,10 @@ export class SmartAccountExactStellarScheme implements SchemeNetworkClient {
       signed += 1;
     }
 
+    if (signed === 0 && tx.simulation && rpc.Api.isSimulationError(tx.simulation)) {
+      // The transfer failed before any rule ran, usually because the balance is too low.
+      throw new Error("The owner's account can't make this payment (most likely not enough balance)");
+    }
     if (signed !== 1) {
       throw new Error(`Expected exactly one auth entry for ${smartAccount}, signed ${signed}`);
     }

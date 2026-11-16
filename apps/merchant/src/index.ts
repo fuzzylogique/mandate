@@ -75,6 +75,14 @@ for (const store of open) {
   }
 }
 
+// `pnpm dev` starts everything at once. The x402 middleware asks the
+// facilitator what it supports as soon as it is created, so wait for it first.
+for (let attempt = 0; attempt < 30; attempt++) {
+  const up = await fetch(`${facilitatorUrl}/supported`).then((response) => response.ok, () => false);
+  if (up) break;
+  await new Promise((resolve) => setTimeout(resolve, 500));
+}
+
 const resourceServer = new x402ResourceServer(
   new HTTPFacilitatorClient({ url: facilitatorUrl }),
 ).register(NETWORK, new ExactStellarScheme());
