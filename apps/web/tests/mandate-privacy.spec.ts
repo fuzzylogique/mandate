@@ -131,7 +131,6 @@ test("newly created mandate is masked and has no separate payment credential", a
   await expect(page.getByRole("combobox", { name: "Currency", exact: true })).toHaveCount(0);
   await page.getByRole("button", { name: "New mandate", exact: true }).click();
   await page.getByLabel("Mandate name", { exact: true }).fill("Purchasing");
-  await page.getByLabel("Mandate holder", { exact: true }).fill("Purchaser");
   await page.getByLabel("Spending limit (USD)", { exact: true }).fill("10");
   await page.getByRole("button", { name: "Create mandate", exact: true }).click();
   const created = page.locator(".mandate-form-card");
@@ -335,7 +334,6 @@ test("seller IDs are entered as numbers and saved with a mandate", async ({ page
   await expect(sellerIds).toHaveAttribute("type", "text");
   await expect(page.getByRole("combobox", { name: /Seller/ })).toHaveCount(0);
   await page.getByLabel("Mandate name", { exact: true }).fill("Restricted purchasing");
-  await page.getByLabel("Mandate holder", { exact: true }).fill("Buyer");
   await page.getByLabel("Spending limit (USD)", { exact: true }).fill("10");
   for (const invalid of ["seller", "1.5", "-1", "101,,202"]) {
     await sellerIds.fill(invalid);
@@ -362,6 +360,33 @@ test("accounts hide internal seller IDs and saved mandate restrictions remain vi
   await page.goto("/mandates");
   await expect(page.getByText("Allowed seller IDs: 202, 303", { exact: true })).toBeVisible();
 });
+
+for (const selected of [false, true]) {
+  test(`mandate user dropdown ${selected ? "uses an account agent" : "can be left empty"}`, async ({ page }) => {
+    await mockWorkspace(page);
+    const agents = [
+      { id: "agt_chat", accountId: account.id, name: "Chat agent", verified: true, verificationTxHash: "chat-registration", createdAt: account.createdAt },
+      { id: "agt_travel", accountId: account.id, name: "Travel booker", verified: true, verificationTxHash: "travel-registration", createdAt: account.createdAt },
+    ];
+    await page.route("**/api/workspace", route => route.fulfill({ json: { ...workspace, agents } }));
+    await page.route("**/api/mandates", async route => {
+      const body = route.request().postDataJSON();
+      if (selected) expect(body.recipient).toBe("agt_travel");
+      else expect(body).not.toHaveProperty("recipient");
+      await route.fulfill({ status: 201, json: { mandate: { ...mandate, recipient: selected ? "agt_travel" : "Any registered agent" }, mandateId } });
+    });
+    await page.goto("/mandates");
+    await page.getByRole("button", { name: "New mandate", exact: true }).click();
+    const owner = page.getByRole("combobox", { name: "Mandate user (optional)", exact: true });
+    await expect(owner).not.toHaveAttribute("required");
+    await expect(owner.locator("option")).toHaveText(["Any registered agent", "Chat agent", "Travel booker"]);
+    if (selected) await owner.selectOption("agt_travel");
+    await page.getByLabel("Mandate name", { exact: true }).fill("Purchasing");
+    await page.getByLabel("Spending limit (USD)", { exact: true }).fill("1");
+    await page.getByRole("button", { name: "Create mandate", exact: true }).click();
+    await expect(page.getByRole("heading", { name: "Mandate created", exact: true })).toBeVisible();
+  });
+}
 
 test("Agents lists account identities and registers new agents without spending settings", async ({ page }) => {
   await mockWorkspace(page);

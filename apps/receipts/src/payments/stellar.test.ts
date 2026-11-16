@@ -112,6 +112,193 @@ async function sellerAccount(service: StellarPaymentService) {
   return (await service.workspace(service.authenticate(result.token))).accounts[0]!;
 }
 
+test("signup creates a unique registered chat agent and login reuses it", async () => {
+  const chain = new TestChain();
+  const service = new StellarPaymentService(":memory:", chain);
+  try {
+    const credentials = { name: "Chat owner", email: "chat@example.com", password: "a secure chat password" };
+    const created = await service.register(credentials);
+    const owner = service.authenticate(created.token);
+    const workspace = await service.workspace(owner);
+    assert.equal(workspace.agents.length, 1);
+    const agent = workspace.agents[0]!;
+    assert.equal(workspace.mandates.length, 1);
+    const defaultMandate = workspace.mandates[0]!;
+    assert.equal(defaultMandate.name, "Chat mandate");
+    assert.equal(defaultMandate.limit, "1");
+    assert.equal(defaultMandate.currency, "USD");
+    assert.equal(defaultMandate.period, "day");
+    assert.equal(defaultMandate.recipient, agent.id);
+    assert.equal(defaultMandate.enforcement, "on-chain");
+    assert.ok(Math.abs(Date.parse(defaultMandate.expiresAt) - Date.now() - 30 * 86400_000) < 1000);
+    assert.equal(agent.name, "Chat agent");
+    assert.equal(agent.accountId, workspace.accounts[0]!.id);
+    assert.equal(agent.verified, true);
+    assert.ok(agent.verificationTxHash);
+    assert.ok(await chain.isVerifiedAgent(workspace.accounts[0]!.address!, agent.id));
+    const login = await service.login(credentials);
+    assert.equal((await service.defaultChatAgent(service.authenticate(login.token))).id, agent.id);
+    assert.equal((await service.workspace(owner)).agents.length, 1);
+    assert.equal((await service.workspace(owner)).mandates.length, 1);
+    const other = await service.register({ ...credentials, email: "chat-other@example.com" });
+    assert.notEqual((await service.defaultChatAgent(service.authenticate(other.token))).id, agent.id);
+  } finally { service.close(); }
+});
+
+test("an existing signed-in dashboard creates missing chat defaults once across concurrent loads", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "mandate-dashboard-defaults-"));
+  const path = join(directory, "workspace.sqlite");
+  const store = new WorkspaceStore(path);
+  const chain = new TestChain();
+  const service = new StellarPaymentService(path, chain);
+  try {
+    // A session created before chat defaults existed, with an established main account.
+    const registered = await store.register({ name: "Existing owner", email: "dashboard-defaults@example.com", password: "a secure existing password" });
+    const owner = service.authenticate(registered.token);
+    const account = await service.createAccount(owner, { name: "Existing account", requestId: "account" });
+    assert.equal(store.read().agents?.length ?? 0, 0);
+    assert.equal(store.read().mandates.length, 0);
+    const [first, second] = await Promise.all([service.workspace(owner), service.workspace(owner)]);
+    for (const view of [first, second]) {
+      assert.equal(view.agents.length, 1);
+      assert.equal(view.agents[0]!.name, "Chat agent");
+      assert.equal(view.agents[0]!.verified, true);
+      assert.equal(view.mandates.length, 1);
+      assert.equal(view.mandates[0]!.name, "Chat mandate");
+      assert.equal(view.mandates[0]!.limit, "1");
+      assert.equal(view.mandates[0]!.accountId, account.id);
+      assert.equal(view.mandates[0]!.recipient, view.agents[0]!.id);
+    }
+    assert.equal(chain.agents.size, 1);
+    assert.equal(chain.rules.size, 1);
+    const reference = first.mandates[0]!.reference;
+    const secret = service.revealMandate(owner, reference).mandateId;
+    assert.equal(JSON.stringify(first).includes(secret), false);
+    await service.revoke(owner, reference);
+    chain.fail = true;
+    const refreshed = await service.workspace(owner);
+    assert.equal(refreshed.mandates[0]!.status, "revoked");
+    assert.equal(refreshed.mandates.length, 1);
+    assert.equal(chain.rules.size, 1);
+  } finally { service.close(); store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("dashboard loading finishes an interrupted default mandate setup without another login", async t => {
+  const directory = mkdtempSync(join(tmpdir(), "mandate-dashboard-recovery-"));
+  const path = join(directory, "workspace.sqlite");
+  const store = new WorkspaceStore(path);
+  const chain = new TestChain();
+  const service = new StellarPaymentService(path, chain);
+  try {
+    const registered = await store.register({ name: "Existing owner", email: "dashboard-recovery@example.com", password: "a secure existing password" });
+    const owner = service.authenticate(registered.token);
+    const creation = t.mock.method(chain, "addMandate", async () => { throw new Error("Rule registration unavailable"); });
+    await assert.rejects(service.workspace(owner));
+    assert.equal(store.read().agents!.length, 1);
+    assert.equal(store.read().mandates.length, 0);
+    const expiry = store.read().customers[0]!.defaultChatMandateExpiresAt;
+    creation.mock.restore();
+    const view = await service.workspace(owner);
+    assert.equal(view.agents.length, 1);
+    assert.equal(view.mandates.length, 1);
+    assert.equal(view.mandates[0]!.expiresAt, expiry);
+    assert.equal(chain.agents.size, 1);
+    assert.equal(chain.rules.size, 1);
+  } finally { service.close(); store.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("a failed default agent registration resumes on login without duplicating the account", async t => {
+  const chain = new TestChain();
+  const service = new StellarPaymentService(":memory:", chain);
+  const registration = t.mock.method(chain, "registerAgent", async () => { throw new Error("Registry unavailable"); });
+  try {
+    const credentials = { name: "Chat owner", email: "chat-recovery@example.com", password: "a secure chat password" };
+    await assert.rejects(service.register(credentials), { status: 503, message: /Sign in to resume/ });
+    assert.equal(chain.wallets.size, 2);
+    registration.mock.restore();
+    const login = await service.login(credentials);
+    const workspace = await service.workspace(service.authenticate(login.token));
+    assert.equal(workspace.accounts.length, 1);
+    assert.equal(workspace.agents.length, 1);
+    assert.equal(workspace.agents[0]!.verified, true);
+    assert.equal(chain.wallets.size, 2);
+  } finally { service.close(); }
+});
+
+test("default mandate setup retries with the reserved expiry and never restores revoked access", async t => {
+  const chain = new TestChain();
+  const service = new StellarPaymentService(":memory:", chain);
+  const creation = t.mock.method(chain, "addMandate", async () => { throw new Error("Rule registration unavailable"); });
+  t.mock.timers.enable({ apis: ["Date"], now: Date.now() });
+  try {
+    const credentials = { name: "Chat owner", email: "mandate-recovery@example.com", password: "a secure chat password" };
+    await assert.rejects(service.register(credentials), { status: 503 });
+    assert.equal(chain.wallets.size, 2);
+    assert.equal(chain.agents.size, 1);
+    creation.mock.restore();
+    t.mock.timers.tick(3600_000);
+    const login = await service.login(credentials);
+    const owner = service.authenticate(login.token);
+    const setup = await service.defaultChatSetup(owner);
+    assert.equal(setup.mandate.limit, "1");
+    assert.equal(chain.rules.size, 1);
+    await service.revoke(owner, setup.mandate.reference);
+    await service.login(credentials);
+    assert.equal((await service.defaultChatSetup(owner)).mandate.status, "revoked");
+    assert.equal(chain.rules.size, 1);
+    assert.equal((await service.workspace(owner)).mandates.length, 1);
+    t.mock.timers.tick(31 * 86400_000);
+    const later = await service.login(credentials);
+    assert.equal((await service.defaultChatSetup(service.authenticate(later.token))).mandate.status, "revoked");
+    assert.equal(chain.rules.size, 1);
+  } finally { service.close(); }
+});
+
+test("mandate user selection is optional and an assigned agent must belong to the account", async () => {
+  const { service, owner } = await fixture();
+  try {
+    const input = { name: "Optional user", recipientType: "agent", limit: "1", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString() };
+    const noOwner = await service.createMandate(owner, { ...input, requestId: "no-owner" });
+    assert.equal(noOwner.mandate.recipient, "Any registered agent");
+    const ownAgent = await service.defaultChatAgent(owner);
+    const assigned = await service.createMandate(owner, { ...input, recipient: ownAgent.id, requestId: "assigned" });
+    assert.equal(assigned.mandate.recipient, ownAgent.id);
+    const foreign = await service.register({ name: "Other", email: "owner-option-other@example.com", password: "another secure password" });
+    const foreignAgent = await service.defaultChatAgent(service.authenticate(foreign.token));
+    await assert.rejects(service.createMandate(owner, { ...input, recipient: foreignAgent.id, requestId: "foreign-owner" }), { status: 400 });
+    await assert.rejects(service.createMandate(owner, { ...input, recipientType: "person", requestId: "missing-email" }), { status: 400 });
+  } finally { service.close(); }
+});
+
+test("HTTP chat selects the signed-in user's default agent and ignores client identity overrides", async t => {
+  const { service, owner, token } = await fixture();
+  const previousKey = process.env.GEMINI_API_KEY;
+  process.env.GEMINI_API_KEY = "test-key";
+  const server = createPaymentApp(service).listen(0, "127.0.0.1");
+  await new Promise<void>(resolve => server.once("listening", resolve));
+  t.after(async () => {
+    if (previousKey === undefined) delete process.env.GEMINI_API_KEY; else process.env.GEMINI_API_KEY = previousKey;
+    await new Promise<void>(resolve => server.close(() => resolve())); service.close();
+  });
+  const base = `http://127.0.0.1:${(server.address() as { port: number }).port}/api/chat/sessions`;
+  const response = await fetch(base, { method: "POST", headers: { cookie: `mandate_session=${token}`, "content-type": "application/json" }, body: JSON.stringify({ agentId: "agt_attacker" }) });
+  assert.equal(response.status, 201);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  const state = await response.json() as { sessionId: string; agentId: string; mandate: { limit: string; reference: string } };
+  assert.equal(state.agentId, (await service.defaultChatAgent(owner)).id);
+  assert.equal(state.mandate.limit, "1");
+  const setup = await service.defaultChatSetup(owner);
+  assert.equal(state.mandate.reference, setup.mandate.reference);
+  assert.equal(JSON.stringify(state).includes(setup.mandateId), false);
+  const guest = await (await fetch(base, { method: "POST" })).json() as { agentId?: string };
+  assert.equal(guest.agentId, undefined);
+  const invalid = await fetch(base, { method: "POST", headers: { cookie: "mandate_session=invalid" } });
+  assert.equal(invalid.status, 401);
+  assert.equal((await fetch(`${base}/${state.sessionId}`)).status, 200);
+  assert.equal((await fetch(`${base}/${state.sessionId}/messages`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ message: "" }) })).status, 400);
+  assert.equal((await fetch(base, { method: "POST", headers: { origin: "https://other.example" } })).status, 403);
+});
+
 test("chain workspace reads external balances and configurable network metadata", async () => {
   const { chain, service, owner, agentId } = await fixture();
   try {
@@ -188,7 +375,7 @@ test("smart mandates install contract rules, sign with their rule, and revoke on
     const paid = await service.payWithMandate({ agentId, mandateId: result.mandateId, amount: "1", sellerAddress: seller.address, reference: "Test", requestId: "payment" });
     assert.equal(paid.mandateReference, result.mandate.reference);
     assert.equal(chain.transfers.at(-1)!.ruleId, result.mandate.ruleId);
-    const view = await service.workspace(owner); assert.equal(view.mandates[0]!.spent, "1");
+    const view = await service.workspace(owner); assert.equal(view.mandates.find(m => m.reference === result.mandate.reference)!.spent, "1");
     assert.equal(JSON.stringify(view).includes(result.mandateId), false);
     await service.revoke(owner, result.mandate.reference);
     assert.equal(chain.rules.get(result.mandate.ruleId!)!.revoked, true);
@@ -204,11 +391,11 @@ test("failed on-chain revocation disables service access and stays visibly retry
     chain.fail = true;
     await assert.rejects(service.revoke(owner, grant.mandate.reference));
     await assert.rejects(service.previewMandatePayment({ agentId, mandateId: grant.mandateId }), { status: 401 });
-    assert.equal((await service.workspace(owner)).mandates[0]!.chainRevocationPending, true);
+    assert.equal((await service.workspace(owner)).mandates.find(m => m.reference === grant.mandate.reference)!.chainRevocationPending, true);
     assert.equal(chain.rules.get(grant.mandate.ruleId!)!.revoked, false);
     chain.fail = false;
     await service.revoke(owner, grant.mandate.reference);
-    assert.equal((await service.workspace(owner)).mandates[0]!.chainRevocationPending, false);
+    assert.equal((await service.workspace(owner)).mandates.find(m => m.reference === grant.mandate.reference)!.chainRevocationPending, false);
     assert.equal(chain.rules.get(grant.mandate.ruleId!)!.revoked, true);
   } finally { service.close(); }
 });
@@ -327,7 +514,7 @@ for (const type of ["traditional", "stellar"] as const) {
       const before = await service.workspace(owner);
       assert.equal(before.accounts.find(a => a.id === source.id)!.balance, "10");
       assert.equal(await chain.balance(chain.wallet(seller.id), "USD"), 0n);
-      assert.equal(before.mandates[0]!.spent, "0");
+      assert.equal(before.mandates.find(m => m.reference === created.mandate.reference)!.spent, "0");
       assert.equal(before.activity.filter(e => e.kind === "payment").length, 0);
       assert.equal(chain.transfers.filter(t => t.ruleId !== undefined).length, 0);
 
@@ -338,7 +525,7 @@ for (const type of ["traditional", "stellar"] as const) {
       const after = await service.workspace(owner);
       assert.equal(after.accounts.find(a => a.id === source.id)!.balance, "9.5");
       assert.equal(await chain.balance(chain.wallet(seller.id), "USD"), 5_000_000n);
-      assert.equal(after.mandates[0]!.spent, "0.5");
+      assert.equal(after.mandates.find(m => m.reference === created.mandate.reference)!.spent, "0.5");
       assert.equal(after.activity.filter(e => e.kind === "payment").length, 1);
     } finally { service.close(); }
   });
@@ -467,7 +654,7 @@ test("existing users adopt a stable main account while retaining historical acco
     assert.equal(view.accounts[0]!.id, first.id);
     assert.equal(view.accounts.length, 2);
     assert.equal(view.accounts.find(a => a.id === historical.id)!.balance, "12");
-    assert.equal(view.mandates[0]!.reference, grant.mandate.reference);
+    assert.ok(view.mandates.some(m => m.reference === grant.mandate.reference));
     assert.equal(view.activity[0]!.accountId, historical.id);
     assert.equal(chain.wallets.size, 4);
   } finally { store.close(); service.close(); rmSync(directory, { recursive: true, force: true }); }
@@ -513,8 +700,8 @@ test("traditional mandates install on-chain USD rules and can pay Stellar Smart 
     assert.equal(paid.settlement, "stellar-testnet"); assert.equal(paid.mandateReference, created.mandate.reference);
     await assert.rejects(service.payWithMandate({ ...input, amount: "5", requestId: "over-limit" }), { status: 403 });
     const view = await service.workspace(owner);
-    assert.equal(view.accounts.length, 1); assert.equal(view.mandates[0]!.spent, "6");
-    assert.equal(chain.transfers.length, 2); assert.equal(chain.rules.size, 1);
+    assert.equal(view.accounts.length, 1); assert.equal(view.mandates.find(m => m.reference === created.mandate.reference)!.spent, "6");
+    assert.equal(chain.transfers.length, 2); assert.equal(chain.rules.size, 3);
     await service.revoke(owner, created.mandate.reference);
     await assert.rejects(service.previewMandatePayment({ agentId, mandateId: created.mandateId }), { status: 401 });
   } finally { service.close(); }
@@ -757,7 +944,7 @@ test("stored mandates preserve signing rules and secret IDs through normalizatio
     const { WorkspaceStore } = await import("./store.ts");
     const store = new WorkspaceStore(path);
     store.update(state => {
-      const saved = state.mandates[0]!;
+      const saved = state.mandates.find(m => m.id === created.mandate.reference)!;
       Object.assign(saved, { tokenHash: saved.mandateIdHash });
       delete saved.mandateIdHash;
     });
@@ -765,7 +952,7 @@ test("stored mandates preserve signing rules and secret IDs through normalizatio
     service = new StellarPaymentService(path, chain);
     assert.equal(service.revealMandate(owner, created.mandate.reference).mandateId, created.mandateId);
     assert.equal((await service.createMandate(owner, details)).mandateId, created.mandateId);
-    assert.equal((await service.workspace(owner)).mandates.length, 1);
+    assert.equal((await service.workspace(owner)).mandates.length, 2);
     assert.equal(readFileSync(path).includes(Buffer.from(created.mandateId)), false);
   } finally { service.close(); rmSync(directory, { recursive: true, force: true }); }
 });
@@ -882,7 +1069,7 @@ test("legacy demo accounts upgrade their balance exactly once after interrupted 
     });
     chain.failFunding = true;
     await assert.rejects(service.workspace(owner));
-    assert.equal(store.read().mandates[0]!.status, "revoked");
+    assert.equal(store.read().mandates.find(m => m.id === "legacy-mandate")!.status, "revoked");
     assert.equal(chain.deposits.length, 1);
     assert.equal(store.read().traditionalUpgrades![0]!.completed, false);
     service.close(); service = new StellarPaymentService(path, chain);
@@ -891,7 +1078,7 @@ test("legacy demo accounts upgrade their balance exactly once after interrupted 
     assert.equal(view.accounts.length, 1);
     assert.ok(StrKey.isValidContract(view.accounts[0]!.address!));
     assert.equal(view.accounts[0]!.balance, "25.5");
-    assert.equal(view.mandates[0]!.status, "revoked");
+    assert.equal(view.mandates.find(m => m.reference === "legacy-mandate")!.status, "revoked");
     assert.equal(chain.deposits.length, 1); assert.equal(chain.transfers.length, 1);
     await service.workspace(owner);
     assert.equal(chain.deposits.length, 1); assert.equal(store.read().traditionalUpgrades![0]!.completed, true);
@@ -920,7 +1107,7 @@ test("legacy Stellar metadata and cached openings expose USD without reinterpret
     const view = await service.workspace(owner);
     assert.equal(view.accounts[0]!.currency, "USD"); assert.equal(view.accounts[0]!.balance, "3");
     assert.equal("balances" in view.accounts[0]!, false);
-    assert.equal(view.mandates[0]!.currency, "XLM");
+    assert.equal(view.mandates.find(m => m.reference === legacy.mandate.reference)!.currency, "XLM");
     await assert.rejects(service.previewMandatePayment({ agentId, mandateId: legacy.mandateId, sellerAddress: seller.address, amount: "1" }), { status: 400 });
     await service.fund(owner, account.id, { amount: "1", requestId: "new-funding" });
     const usd = await service.createMandate(owner, { ...details, requestId: "new-usd-mandate" });
@@ -1005,7 +1192,7 @@ test("seller restrictions are saved without verification and enforced for every 
     assert.equal(paid.destination, allowed.address);
     assert.equal((await service.payWithMandate(allowedInput)).id, paid.id);
     assert.equal(chain.transfers.length, before + 1);
-    assert.equal((await service.workspace(owner)).mandates[0]!.spent, "1");
+    assert.equal((await service.workspace(owner)).mandates.find(m => m.reference === created.mandate.reference)!.spent, "1");
   } finally { service.close(); }
 });
 
@@ -1036,16 +1223,18 @@ test("agent registrations persist, stay account-scoped, and publish only after c
     const input = { name: "Researcher", requestId: "researcher" };
     chain.fail = true;
     await assert.rejects(service.createAgent(owner, input));
-    assert.equal((await service.workspace(owner)).agents.length, 1);
+    assert.equal((await service.workspace(owner)).agents.length, 2);
     chain.fail = false;
     const agent = await service.createAgent(owner, input);
     assert.equal((await service.createAgent(owner, input)).id, agent.id);
     await assert.rejects(service.createAgent(owner, { ...input, name: "Changed" }), { status: 409 });
     const other = await service.register({ name: "Other", email: "agent-other@example.com", password: "another secure password" });
-    assert.deepEqual((await service.workspace(service.authenticate(other.token))).agents, []);
+    const otherAgents = (await service.workspace(service.authenticate(other.token))).agents;
+    assert.equal(otherAgents.length, 1);
+    assert.equal(otherAgents[0]!.name, "Chat agent");
     service.close(); service = new StellarPaymentService(path, chain);
     const view = await service.workspace(owner);
-    assert.deepEqual(view.agents.map(agent => agent.id), [agentId, agent.id]);
+    assert.deepEqual(view.agents.map(agent => agent.id), [(await service.defaultChatAgent(owner)).id, agentId, agent.id]);
     assert.ok(view.agents.every(agent => agent.verified && agent.verificationTxHash));
     chain.agents.delete(`${view.accounts[0]!.address}:${agent.id}`);
     assert.equal((await service.workspace(owner)).agents.find(saved => saved.id === agent.id)!.verified, false);
@@ -1079,6 +1268,6 @@ test("payments require a chain-registered account agent and allow every agent on
     chain.agents.delete(`${account.address}:${agentId}`);
     await assert.rejects(service.payWithMandate({ ...input, requestId: "revoked-agent" }), { status: 403 });
     await assert.rejects(service.pay(owner, { accountId: account.id, mandateReference: grant.mandate.reference, destination: seller.address, amount: "0.5", reference: "Bypass", requestId: "bypass" }), { status: 401 });
-    assert.equal((await service.workspace(owner)).mandates[0]!.spent, "1");
+    assert.equal((await service.workspace(owner)).mandates.find(m => m.reference === grant.mandate.reference)!.spent, "1");
   } finally { service.close(); }
 });

@@ -220,6 +220,22 @@ and optionally `GEMINI_MODEL` in `.env`. The direct `pnpm pay:langchain` command
 uses explicit arguments and needs no model. Both call `/api/pay` with a stable
 request ID; see the module README for configuration, retries and import examples.
 
+For a chat-box UI, run `pnpm dev` and open `http://localhost:4020/chat`
+(or click **Chat** in the dashboard). The UI uses the same agent, supports
+follow-up questions, and shows the payment result. Gemini runs on the API server;
+the API key stays in `.env`.
+New users receive a registered **Chat agent** and **Chat mandate** during signup.
+The mandate allows **1 USD per rolling 24 hours** and expires after 30 days.
+Signed-in chats use both automatically, so payment prompts only need the seller
+address and amount. Existing users receive these defaults when loading the
+dashboard, signing in, or starting a signed-in chat. Creating a mandate grants access to the account's
+existing balance; fund the main account before paying.
+
+The create-mandate form has an optional **Mandate user** dropdown listing the
+account's agents. Leaving it empty labels the mandate **Any registered agent**.
+This is a user label; any registered agent on the source account can use
+the mandate. Revoked or expired default mandates are never recreated on login.
+
 ## Checks
 
 ```bash

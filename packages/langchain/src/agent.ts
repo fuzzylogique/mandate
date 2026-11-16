@@ -16,6 +16,10 @@ export interface PaymentAgentOptions {
   model?: BaseChatModel;
   apiUrl?: string;
   requestId?: string;
+  /** A trusted account identity supplied by the host for signed-in chats. */
+  agentId?: string;
+  /** Optional default mandate bound by the host, kept outside model prompts. */
+  mandateId?: string;
 }
 
 /** One payment session, including any clarification messages before submission. */
@@ -35,7 +39,11 @@ export function createPaymentAgent(options: PaymentAgentOptions = {}) {
 
   let attempt: { fingerprint: string; result: Promise<MandatePaymentResult> } | undefined;
   let paymentResult: MandatePaymentResult | undefined;
-  const pay = tool(async ({ mandateId, agentId, sellerId, amount, reference }) => {
+  const pay = tool(async ({ mandateId: suppliedMandateId, agentId: suppliedAgentId, sellerId, amount, reference }) => {
+    const mandateId = options.mandateId ?? suppliedMandateId;
+    if (!mandateId) throw new Error("Mandate ID is required.");
+    const agentId = options.agentId ?? suppliedAgentId;
+    if (!agentId) throw new Error("Agent identification is required.");
     const input = { amount, reference, requestId };
     const fingerprint = JSON.stringify({ mandateId, agentId, sellerId, ...input });
     if (attempt) {
@@ -52,8 +60,12 @@ export function createPaymentAgent(options: PaymentAgentOptions = {}) {
     name: "pay_with_mandate",
     description: "Submit one USD payment using the mandate ID, agent identification, seller Smart Account C address and amount supplied by the user. Returns the payment API's paid, declined or pending result.",
     schema: paymentSchema.omit({ requestId: true }).extend({
-      mandateId: z.string().trim().min(1).max(128).describe("Exact secret mandate ID from the user's prompt"),
-      agentId: z.string().trim().min(1).max(128).describe("Exact on-chain registered agent identification from the user’s prompt"),
+      mandateId: options.mandateId
+        ? z.string().optional().describe("The application supplies the default mandate; this field can be omitted")
+        : z.string().trim().min(1).max(128).describe("Exact secret mandate ID from the user's prompt"),
+      agentId: options.agentId
+        ? z.string().optional().describe("The application supplies the registered chat agent identity; this field can be omitted")
+        : z.string().trim().min(1).max(128).describe("Exact on-chain registered agent identification from the user’s prompt"),
       sellerId: z.string().trim().regex(/^C[A-Z2-7]{55}$/).describe("Exact seller Smart Account C address from the user's prompt"),
     }),
   });
@@ -63,6 +75,8 @@ export function createPaymentAgent(options: PaymentAgentOptions = {}) {
     tools: [pay],
     systemPrompt: `You help the user make a single USD payment on Stellar testnet.
 Extract the exact mandate ID, agent identification, seller Smart Account C address, and decimal USD amount from the conversation.
+${options.agentId ? `The application has assigned your registered agent identification: ${options.agentId}. Use this identity for every payment. Do not ask the user for agent identification or use a different one.` : "Ask the user for their registered agent identification if missing."}
+${options.mandateId ? "The application supplies a default mandate with a 1 USD rolling daily limit. Do not ask the user for a mandate ID. Omit this field from tool calls; the application supplies it privately." : "Ask the user for the secret mandate ID if missing."}
 If a required detail is missing or ambiguous, ask for it before calling the payment tool. Never invent IDs or an amount.
 The user's payment request authorizes calling the tool. Only call it when the user asks to make a payment.
 Use the user's payment reference if supplied; otherwise use "LangChain payment".

@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { StrKey } from "@stellar/stellar-sdk";
 import { formatAmount, toBaseUnits } from "@mandate/shared";
-import type { AccountAgent, AccountMandate, AccountOpening, FundingMethod, MandatePaymentPreview, PaymentEntry, PaymentWorkspace, SpendingAccount } from "@mandate/shared";
+import type { AccountAgent, AccountMandate, AccountOpening, FundingMethod, MandateCreation, MandatePaymentPreview, PaymentEntry, PaymentWorkspace, SpendingAccount } from "@mandate/shared";
 import { WorkspaceStore, ServiceError, amount, requireThat, text, validateMandateInput, type Actor, type EntryRecord, type MandateRecord, type StellarAccountPair, publicEntry } from "./store.ts";
 import type { ChainGateway, ChainReceipt } from "./stellar.ts";
 import { fundingAmount } from "./funding.ts";
@@ -9,6 +9,7 @@ import { fundingAmount } from "./funding.ts";
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 const timestamp = () => new Date().toISOString();
 const decimal = (value: bigint) => formatAmount(value.toString());
+type ChatSetup = MandateCreation & { agent: AccountAgent };
 
 
 /** Auth and account ownership stay local; money and smart-account rules live on Stellar. */
@@ -16,6 +17,7 @@ export class StellarPaymentService {
   readonly network;
   private core: WorkspaceStore;
   private chain: ChainGateway;
+  private chatSetups = new Map<string, Promise<ChatSetup>>();
   constructor(path: string, chain: ChainGateway) {
     this.core = new WorkspaceStore(path);
     this.chain = chain;
@@ -25,7 +27,7 @@ export class StellarPaymentService {
   close() { this.core.close(); this.chain.close(); }
   async register(body: Record<string, unknown>) {
     const result = await this.core.register(body);
-    try { await this.mainAccount(this.core.authenticate(result.token)); }
+    try { await this.defaultChatSetup(this.core.authenticate(result.token)); }
     catch (error) {
       this.core.logout(result.token);
       throw new ServiceError(503, "Your login was created, but account setup is still pending. Sign in to resume setup.", error instanceof ServiceError ? error.txHash : undefined);
@@ -34,7 +36,7 @@ export class StellarPaymentService {
   }
   async login(body: Record<string, unknown>) {
     const result = await this.core.login(body);
-    try { await this.mainAccount(this.core.authenticate(result.token)); }
+    try { await this.defaultChatSetup(this.core.authenticate(result.token)); }
     catch (error) { this.core.logout(result.token); throw error; }
     return result;
   }
@@ -89,6 +91,12 @@ export class StellarPaymentService {
     for (const account of [...initial.accounts, ...initial.shared.map(shared => shared.account)]) {
       if (!account.address || !StrKey.isValidContract(account.address) || this.upgradePending(account.id)) await this.upgradeTraditional(account);
     }
+    const state = this.core.read();
+    const chatAgentId = `agt_${digest(this.commandId(actor, "agent", "default-chat")).slice(0, 32)}`;
+    const chatMandateId = digest(this.commandId(actor, "mandate", "default-chat")).slice(0, 32);
+    if (!state.agents?.some(agent => agent.id === chatAgentId) || !state.mandates.some(mandate => mandate.id === chatMandateId)) {
+      await this.defaultChatSetup(actor);
+    }
     const view = this.core.workspace(actor);
     const accounts = new Map<string, SpendingAccount>();
     for (const account of [...view.accounts, ...view.shared.map(s => s.account)]) accounts.set(account.id, account);
@@ -128,6 +136,40 @@ export class StellarPaymentService {
       this.core.update(state => { const agents = state.agents ??= []; if (!agents.some(saved => saved.id === id)) agents.push(agent); });
       return agent;
     });
+  }
+  /** Stable command ID makes signup, login recovery and concurrent chats reuse one identity. */
+  async defaultChatAgent(actor: Actor): Promise<AccountAgent> {
+    return this.createAgent(actor, { name: "Chat agent", requestId: "default-chat" });
+  }
+  async defaultChatSetup(actor: Actor): Promise<ChatSetup> {
+    const ownerId = this.customer(actor).id;
+    const existing = this.chatSetups.get(ownerId);
+    if (existing) return existing;
+    const setup = this.provisionChatSetup(actor);
+    this.chatSetups.set(ownerId, setup);
+    try { return await setup; }
+    finally { this.chatSetups.delete(ownerId); }
+  }
+  private async provisionChatSetup(actor: Actor): Promise<ChatSetup> {
+    const agent = await this.defaultChatAgent(actor);
+    const reference = digest(this.commandId(actor, "mandate", "default-chat")).slice(0, 32);
+    const state = this.core.read();
+    const existing = state.mandates.find(mandate => mandate.id === reference);
+    if (existing) {
+      // Never renew expired access or recreate a mandate the owner has revoked.
+      return { agent, mandate: this.core.mandateView(state, existing), ...this.revealMandate(actor, reference) };
+    }
+    // Reserve expiry before chain work so interrupted setup can reuse identical details.
+    const expiresAt = this.core.update(state => {
+      const customer = state.customers.find(customer => customer.id === actor.id)!;
+      customer.defaultChatMandateExpiresAt ??= new Date(Date.now() + 30 * 86400_000).toISOString();
+      return customer.defaultChatMandateExpiresAt;
+    });
+    const created = await this.createMandate(actor, {
+      name: "Chat mandate", recipientType: "agent", recipient: agent.id,
+      limit: "1", period: "day", expiresAt, requestId: "default-chat",
+    });
+    return { agent, ...created };
   }
   private async paymentAgent(accountId: string, value: unknown) {
     requireThat(typeof value === "string" && value.trim().length > 0 && value.trim().length <= 128, 401, "Agent identification is required");
@@ -233,6 +275,9 @@ export class StellarPaymentService {
     requireThat(this.network.mandates, 503, "Run pnpm setup:contracts to configure verified-smart mandate payments");
     const commandId = this.commandId(actor, "mandate", body.requestId);
     const validated = validateMandateInput(body);
+    if (validated.recipientType === "agent" && validated.recipient.startsWith("agt_")) {
+      requireThat(this.core.read().agents?.some(agent => agent.id === validated.recipient && agent.accountId === account.id), 400, "Choose a mandate user from this account's agents");
+    }
     const currency = this.currency(body.currency);
     const id = digest(commandId).slice(0, 32);
     const details = { accountId: account.id, currency, name: validated.name, recipient: validated.recipient, recipientType: validated.recipientType, limit: validated.limit, period: validated.period, expiresAt: validated.expiresAt, ...(validated.sellerIds ? { sellerIds: validated.sellerIds } : {}) };

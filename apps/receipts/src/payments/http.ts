@@ -1,6 +1,7 @@
 import express, { type NextFunction, type Request, type Response } from "express";
 import { ServiceError } from "./store.ts";
 import type { StellarPaymentService } from "./stellar-service.ts";
+import { ChatError, createPaymentChats } from "@mandate/langchain/chat";
 
 function sessionToken(req: Request): string {
   const value = req.headers.cookie?.split(";").map(c => c.trim()).find(c => c.startsWith("mandate_session="));
@@ -35,6 +36,8 @@ export function createPaymentApp(service: StellarPaymentService) {
   };
   const throttle = rateLimit(30, 15 * 60_000, "Too many sign-in attempts. Try again in 15 minutes.");
   const paymentThrottle = rateLimit(60, 60_000, "Too many payment requests. Try again in a minute.");
+  const chatThrottle = rateLimit(20, 60_000, "Too many chat requests. Try again in a minute.");
+  const chats = createPaymentChats();
   const actor = (req: Request) => service.authenticate(sessionToken(req));
   const body = (req: Request): Record<string, unknown> => {
     if (!req.is("application/json") || !req.body || Array.isArray(req.body) || typeof req.body !== "object") throw new ServiceError(400, "A JSON object is required");
@@ -78,11 +81,23 @@ export function createPaymentApp(service: StellarPaymentService) {
       } else throw error;
     }
   });
+  app.post("/api/chat/sessions", chatThrottle, async (req, res) => {
+    const setup = sessionToken(req) ? await service.defaultChatSetup(actor(req)) : undefined;
+    const mandate = setup?.mandate;
+    res.status(201).json(chats.open(setup && mandate ? {
+      agentId: setup.agent.id, mandateId: setup.mandateId,
+      mandate: { reference: mandate.reference, name: mandate.name, limit: mandate.limit, period: mandate.period, expiresAt: mandate.expiresAt, status: mandate.status },
+    } : {}));
+  });
+  app.get("/api/chat/sessions/:id", (req, res) => res.json(chats.read(req.params.id as string)));
+  app.post("/api/chat/sessions/:id/messages", chatThrottle, async (req, res) => {
+    res.json(await chats.send(req.params.id as string, body(req).message));
+  });
   app.get("/api/network", (_req, res) => res.json({ mode: "stellar-testnet", network: service.network }));
   app.get("/api/health", (_req, res) => res.json({ ok: true, mode: "stellar-testnet" }));
   app.use((_req, res) => res.status(404).json({ error: "Route not found" }));
   app.use((error: unknown, _req: Request, res: Response, _next: NextFunction) => {
-    const status = error instanceof ServiceError ? error.status : error instanceof SyntaxError ? 400 : 500;
+    const status = error instanceof ServiceError || error instanceof ChatError ? error.status : error instanceof SyntaxError ? 400 : 500;
     if (status === 500) console.error("[payments]", error);
     res.status(status).json({ error: status === 500 ? "The service could not complete this request" : error instanceof Error ? error.message : "Invalid request" });
   });
