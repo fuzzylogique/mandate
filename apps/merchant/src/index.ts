@@ -1,25 +1,79 @@
-// Demo store: a shop that takes payment over x402. It stands in for anywhere a
-// shopper might buy from. It is a fixture for the demo, not part of the product.
+// Demo stores: three shops that take payment over x402, so shoppers have
+// something to compare. They stand in for anywhere a shopper might buy from.
+// This is a fixture for the demo, not part of the product.
+//
+//   GET /catalog            free: every store and what it sells
+//   GET /<store>/<item>     paid: x402, settles to that store's own address
+//
+// FreshMart and GreenLeaf are registered as trusted stores by `pnpm setup`.
+// FreshMarrt is a look-alike that is not, and undercuts both on price.
 import express from "express";
 import { HTTPFacilitatorClient } from "@x402/core/server";
 import { paymentMiddleware, x402ResourceServer } from "@x402/express";
 import { ExactStellarScheme } from "@x402/stellar/exact/server";
-import { NETWORK } from "@mandate/shared";
+import { NETWORK, toBaseUnits } from "@mandate/shared";
 import { requireEnv } from "@mandate/shared/env";
 
 const port = Number(process.env.MERCHANT_PORT ?? 4021);
-// Must be a classic G-address with a USDC trustline.
-const payTo = requireEnv("MERCHANT_ADDRESS");
 const facilitatorUrl = process.env.FACILITATOR_URL ?? "https://x402.org/facilitator";
-
-// Optional: charge in another SEP-41 token (C-address) instead of USDC, e.g.
-// testnet XLM while waiting on the USDC faucet. Amounts are then base units.
+// The demo-dollar token contract. Without it, prices are in USDC.
 const asset = process.env.MERCHANT_ASSET;
-const price = (usd: string, baseUnits: string) => (asset ? { amount: baseUnits, asset } : usd);
 
-// A second, look-alike store that is not in the seller registry. The shopper's
-// rules should refuse to pay it. Demo fixture only.
-const impostorPayTo = process.env.IMPOSTOR_ADDRESS;
+interface Item { id: string; title: string; price: string }
+interface StoreConfig { slug: string; name: string; domain: string; payTo?: string; looksLike?: string; items: Item[] }
+
+const stores: StoreConfig[] = [
+  {
+    slug: "freshmart",
+    name: "FreshMart",
+    domain: "freshmart.example",
+    payTo: requireEnv("MERCHANT_ADDRESS"),
+    items: [
+      { id: "herbs", title: "Fresh herbs bundle", price: "2.40" },
+      { id: "basil", title: "Basil, 4 bunches", price: "3.20" },
+      { id: "olive-oil", title: "Olive oil, 1 L", price: "9.50" },
+      { id: "mixer", title: "Commercial stand mixer", price: "120.00" },
+    ],
+  },
+  {
+    slug: "greenleaf",
+    name: "GreenLeaf Market",
+    domain: "greenleaf.example",
+    payTo: process.env.GREENLEAF_ADDRESS,
+    items: [
+      { id: "herbs", title: "Fresh herbs bundle", price: "2.10" },
+      { id: "basil", title: "Basil, 4 bunches", price: "3.60" },
+      { id: "olive-oil", title: "Olive oil, 1 L", price: "8.75" },
+      { id: "napkins", title: "Linen napkins, 12", price: "14.00" },
+    ],
+  },
+  {
+    slug: "freshmarrt",
+    name: "FreshMarrt",
+    domain: "freshmarrt.example",
+    payTo: process.env.IMPOSTOR_ADDRESS,
+    looksLike: "FreshMart",
+    items: [
+      { id: "herbs", title: "Fresh herbs bundle", price: "1.20" },
+      { id: "basil", title: "Basil, 4 bunches", price: "1.50" },
+      { id: "olive-oil", title: "Olive oil, 1 L", price: "4.00" },
+    ],
+  },
+];
+const open = stores.filter((store): store is StoreConfig & { payTo: string } => Boolean(store.payTo));
+
+const price = (dollars: string) => (asset ? { amount: toBaseUnits(dollars), asset } : `$${dollars}`);
+
+type Routes = Parameters<typeof paymentMiddleware>[0];
+const routes: Routes = {};
+for (const store of open) {
+  for (const item of store.items) {
+    routes[`GET /${store.slug}/${item.id}`] = {
+      accepts: [{ scheme: "exact", price: price(item.price), network: NETWORK, payTo: store.payTo }],
+      description: `${item.title} from ${store.name}`,
+    };
+  }
+}
 
 const resourceServer = new x402ResourceServer(
   new HTTPFacilitatorClient({ url: facilitatorUrl }),
@@ -27,51 +81,35 @@ const resourceServer = new x402ResourceServer(
 
 const app = express();
 
-app.use(
-  paymentMiddleware(
-    {
-      "GET /herbs": {
-        accepts: [{ scheme: "exact", price: price("$2.40", "24000000"), network: NETWORK, payTo }],
-        description: "Fresh herbs bundle",
-      },
-      "GET /mixer": {
-        // Priced above a typical limit, to show a blocked payment.
-        accepts: [{ scheme: "exact", price: price("$120.00", "1200000000"), network: NETWORK, payTo }],
-        description: "Commercial stand mixer",
-      },
-      ...(impostorPayTo
-        ? {
-            "GET /lookalike/herbs": {
-              accepts: [
-                { scheme: "exact" as const, price: price("$2.40", "24000000"), network: NETWORK, payTo: impostorPayTo },
-              ],
-              description: "Fresh herbs bundle",
-            },
-          }
-        : {}),
-    },
-    resourceServer,
-  ),
-);
-
-const order = (item: string) => ({ order: "confirmed", item, pickup: "Tomorrow, 8 am" });
-
-app.get("/herbs", (_req, res) => {
-  res.json(order("Fresh herbs bundle"));
-});
-
-app.get("/lookalike/herbs", (_req, res) => {
-  res.json(order("Fresh herbs bundle"));
-});
-
-app.get("/mixer", (_req, res) => {
-  res.json(order("Commercial stand mixer"));
+// Free: the catalog shoppers compare.
+app.get("/catalog", (req, res) => {
+  const base = `${req.protocol}://${req.get("host")}`;
+  res.json({
+    stores: open.map((store) => ({
+      slug: store.slug,
+      name: store.name,
+      domain: store.domain,
+      payTo: store.payTo,
+      looksLike: store.looksLike,
+      items: store.items.map((item) => ({ ...item, url: `${base}/${store.slug}/${item.id}` })),
+    })),
+  });
 });
 
 app.get("/health", (_req, res) => {
-  res.json({ ok: true, payTo, network: NETWORK });
+  res.json({ ok: true, network: NETWORK, stores: open.map((store) => store.slug) });
 });
 
+app.use(paymentMiddleware(routes, resourceServer));
+
+for (const store of open) {
+  for (const item of store.items) {
+    app.get(`/${store.slug}/${item.id}`, (_req, res) => {
+      res.json({ order: "confirmed", store: store.name, item: item.title, price: item.price, delivery: "Tomorrow, 8 am" });
+    });
+  }
+}
+
 app.listen(port, () => {
-  console.log(`merchant listening on http://localhost:${port} (payTo ${payTo})`);
+  console.log(`demo stores on http://localhost:${port}: ${open.map((store) => store.name).join(", ")}`);
 });

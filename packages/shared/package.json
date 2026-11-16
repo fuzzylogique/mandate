@@ -4,6 +4,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./api": "./src/api.ts",
     "./env": "./src/env.ts",
     "./smart-account": "./src/smart-account.ts"
   },

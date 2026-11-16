@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "dev": "node --env-file-if-exists=../../.env --watch src/index.ts",
-    "typecheck": "tsc -p ."
+    "typecheck": "tsc -p .",
+    "test": "node --test src/**/*.test.ts"
   },
   "dependencies": {
     "@mandate/shared": "workspace:*",

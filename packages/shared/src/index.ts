@@ -1,4 +1,6 @@
-// Types and helpers shared by the agent, merchant, receipt service and dashboard.
+// Types and helpers shared by the agent, merchant, service and apps.
+// The public API types are in ./api.ts; the service's own records in ./payments.ts.
+export type * from "./payments.ts";
 
 /** CAIP-2 id of the network everything runs on for the challenge. */
 export const NETWORK = "stellar:testnet" as const;
