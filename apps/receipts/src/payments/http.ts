@@ -10,6 +10,12 @@ function sessionToken(req: Request): string {
 export function createPaymentApp(service: StellarPaymentService) {
   const app = express();
   app.disable("x-powered-by");
+  // Stripe signs the original bytes. Register this before JSON parsing and browser origin checks.
+  app.post("/api/stripe/webhook", express.raw({ type: "application/json", limit: "256kb" }), async (req, res) => {
+    if (!Buffer.isBuffer(req.body)) throw new ServiceError(400, "A raw JSON webhook payload is required");
+    await service.stripeWebhook(req.body, req.get("stripe-signature") ?? "");
+    res.json({ received: true });
+  });
   app.use(express.json({ limit: "16kb" }));
   app.use((req, res, next) => {
     res.setHeader("Cache-Control", "no-store");
@@ -58,7 +64,14 @@ export function createPaymentApp(service: StellarPaymentService) {
   app.post("/api/accounts/open", async (req, res) => {
     res.status(201).json(await service.openAccount(actor(req), body(req)));
   });
-  app.post("/api/accounts/:id/funding", async (req, res) => res.status(201).json(await service.fund(actor(req), req.params.id as string, body(req))));
+  app.post("/api/accounts/:id/funding", async (req, res) => {
+    const input = body(req);
+    const owner = actor(req);
+    const method = input.method ?? "fiat";
+    if (method !== "fiat" && method !== "testnet") throw new ServiceError(400, "Choose FIAT or Testnet funding");
+    res.status(201).json(method === "fiat" ? await service.createFiatCheckout(owner, req.params.id as string, input) : await service.fund(owner, req.params.id as string, input));
+  });
+  app.get("/api/funding/stripe/:sessionId", async (req, res) => res.json(await service.fiatFundingStatus(actor(req), req.params.sessionId as string)));
   app.post("/api/mandates", async (req, res) => res.status(201).json(await service.createMandate(actor(req), body(req))));
   app.post("/api/mandates/:id/reveal", (req, res) => res.json(service.revealMandate(actor(req), req.params.id as string)));
   app.delete("/api/mandates/:id", async (req, res) => { await service.revoke(actor(req), req.params.id as string); res.status(204).end(); });
