@@ -1,84 +1,105 @@
 # Mandate
 
-Spending rules and receipts for AI agents, enforced on Stellar.
+Shoppers that buy for you on their own, inside rules your account enforces on Stellar.
 
-An owner gives each agent a **mandate**: how much it may spend per period, which
-verified sellers it may pay, and until when. The rules live in Stellar Smart
-Contracts and are checked at payment time, so an over-limit payment or a payment to an
-unverified seller fails on-chain no matter what the agent does. Every payment
-that goes through becomes a receipt: agent, owner, seller, amount, transaction.
+You give a shopper a sentence: *"Keep herbs stocked. Spend up to $10 every week
+at trusted stores only."* From then on it works without you. It compares the
+stores it may use, buys from the cheapest trusted one, and leaves a receipt that
+says why it chose that store. You hear from it only when something is outside
+your rules: a store that isn't trusted, or a price over its limit. Then you get a
+request with three answers: **Allow once**, **Raise the limit**, or **No**.
+
+The rules aren't a setting in our app. Each customer's money sits in a Stellar
+smart account, and each shopper signs with its own key under its own rule on
+that account. A spending-limit policy and a trusted-store policy check every
+payment, so a shopper (or a bug in our service) can't pay past them.
 
 Built for the Blockchain Innovation Challenge powered by Stellar (Problem Space 2,
-Verification Infrastructure). "Mandate" is a working name.
+Verification Infrastructure).
+
+## Who shops
+
+| Shopper | Who runs it | How it pays |
+|---|---|---|
+| **Mandate shops for you** | Our service, on a schedule ("keep herbs stocked, weekly"). | Its own key, kept encrypted by the service, signing under its rule. |
+| **Your AI assistant** | Claude, or any assistant that speaks MCP. You give it a one-time code. | It makes its own key and holds it. The service never sees it. |
+| **Someone you trust** | A person on your team or in your household. | They sign in and buy. Their rule on your account decides. |
 
 ## How it works
 
 ```
-Owner ──creates / revokes mandate──► Smart account (C-address, holds USDC)
-                                      └─ rule: agent key, USDC transfers only, expiry
-                                          ├─ spending-limit policy
-                                          └─ verified-seller policy ──► seller registry
+You ──sentence + limit──► Smart account (one per customer, holds demo dollars)
+                           ├─ rule 0: you
+                           └─ rule n: one per shopper, with that shopper's key
+                                ├─ spending-limit policy (per day, week or month)
+                                └─ trusted-store policy ──► store registry
 
-Agent ──request──► Seller API ──402──► agent signs one transfer ──► facilitator settles, pays fees
+Shopper ──find offers──► compares stores ──x402──► signs one transfer under its rule
+                                                     └─► facilitator settles on Stellar
+Blocked? ──► "Needs you": allow once (you pay, under rule 0) · raise the limit · no
 
-Receipt service ◄── PaymentAuthorized events + what the agent bought ──► dashboard, email
+Service ◄── PaymentAuthorized events + notes ("cheapest of 2 trusted stores") ──► web and iPhone apps
 ```
 
-On-chain: who may spend, how much, to whom, and proof that a payment passed
-those checks. Off-chain: what was bought, names, emails.
+On-chain: who may spend, how much, to whom, and proof each payment passed
+those checks. Off-chain: names, what was bought, why a store was picked.
+
+Payments go over [x402](https://developers.stellar.org/docs/build/agentic-payments/x402),
+the HTTP payment protocol: a store answers `402 Payment Required`, the shopper
+signs and retries. Stores that don't take x402 are on the roadmap (a card rail
+for the same rules).
 
 ## Layout
 
 | Path | What it is |
 |---|---|
 | `contracts/account` | The smart account. Adapted from OpenZeppelin's multisig example. |
-| `contracts/ed25519-verifier` | Checks agent signatures. OpenZeppelin wrapper. |
+| `contracts/ed25519-verifier` | Checks shopper and owner signatures. OpenZeppelin wrapper. |
 | `contracts/spending-limit-policy` | Cap per rolling window. OpenZeppelin wrapper. |
-| `contracts/seller-registry` | Verified seller accounts and their domains. Ours. |
-| `contracts/verified-seller-policy` | Rejects payments to unregistered sellers; emits the receipt event. Ours. |
-| `apps/merchant` | Demo store: sells over x402. A fixture, not the product. |
-| `apps/agent` | Buyer agent: pays for a URL over x402, from its own account or from the smart account. |
+| `contracts/seller-registry` | Trusted stores and their domains. Ours. |
+| `contracts/verified-seller-policy` | Rejects payments to stores not in the registry; emits the receipt event. Ours. |
+| `apps/receipts` | The Mandate service: sign-in, accounts, shoppers and their jobs, approval requests, the agent API, receipts. Its Stellar layer (encrypted key vault, command journal, idempotent submits) is Jacob's. |
+| `apps/merchant` | Three demo stores selling over x402: FreshMart and GreenLeaf (trusted) and FreshMarrt (a look-alike, not trusted). Fixtures, not the product. |
 | `apps/facilitator` | Our own x402 facilitator. Needed for smart-account payments (see below). |
-| `apps/receipts` | Dashboard API: indexes payments into receipts, reads balance and mandates from chain, creates and revokes mandates, runs demo purchases, records refusals. |
-| `apps/web` | The owner's web app: balance, shoppers and their limits, activity with receipts and blocked payments. |
-| `apps/ios` | The owner's iPhone app (SwiftUI): the same account, with Face ID before a shopper is given money to spend. |
-| `packages/shared` | Types shared by the TypeScript packages. |
-| `scripts/` | Testnet setup, contract deployment, mandate creation, funding, direct transfer test. |
+| `apps/agent` | The connector for AI assistants: an MCP server and a CLI. Holds the assistant's own key. |
+| `apps/web` | The owner's web app. |
+| `apps/ios` | The owner's iPhone app (SwiftUI), the same account. |
+| `packages/shared` | Types shared by the TypeScript packages, and the smart-account x402 signer. |
+| `scripts/` | Testnet setup and contract deployment. |
 
 ## Status
 
-Verified on Stellar testnet on Nov 12, using testnet XLM's token contract as the
-payment token (the USDC faucet needs a captcha, so USDC itself is untested):
+Checked end to end on Stellar testnet on Nov 15:
 
-| Piece | State |
+| Flow | State |
 |---|---|
-| Contracts | Deployed. Unit tests pass (registry: 1, verified-seller policy: 4). |
-| Owner creates a mandate | Works (`scripts/create-mandate.ts`, signed by the owner's key). |
-| Agent pays a verified seller within its limit | Works, directly and through x402. |
-| Agent pays an unverified recipient | Refused by the account's contracts. |
-| Agent exceeds its limit | Refused by the account's contracts, directly and through x402. |
-| Receipts | Each payment is indexed from chain into a receipt, with what was bought attached. |
-| Web app | Works against testnet (checked in a browser): add a shopper with a limit, send it shopping, see the receipt or the blocked payment and why, stop a shopper. |
-| iPhone app | Works against testnet (checked in the iOS Simulator): the same flows, plus Face ID or passcode before a shopper is added. |
-| Owner sign-in, receipt email | Not started. |
-| Seller verification against `stellar.toml` | Not started; sellers are registered by hand. |
+| Sign up, open an account, add money | Works. Opening deploys the customer's own smart account (about 10 s). |
+| Hosted shopper keeps an item stocked | Works. Compares trusted stores, buys the cheapest, writes why. |
+| Look-alike store | Blocked on-chain. Shows as "Needs you" with the store it imitates. |
+| Over the limit | Blocked on-chain. Allow once (you pay) and raise the limit (changed on-chain, then the shopper buys) both work. |
+| AI assistant over MCP | Works with Claude Code: connect with a code, check budget, find products, buy, check a request. |
+| Shared spending | Works. The person signs in and buys; their limit and the trusted-store rule apply. |
+| Stop a shopper | Works. Its rule is removed from the account; it can't pay after. |
+| Seller verification against `stellar.toml` | Not started; stores are registered by setup. |
+| Stores without x402 | Not started (card rail). |
 
 ### Deployed on testnet
 
 | Contract | Id |
 |---|---|
-| Smart account (demo owner) | `CBZCTZ3SYFZ4FMI43HHMQMH26YWWPTL7N4INLJZ3UGYKHIEJLIZFWZ3X` |
-| Verified-seller policy | `CBNGZVLAVZWXG6XGHDLOWPGLZA3FPZSSH5GU3KJZTFGG2ZZUQ33CBFGV` |
-| Seller registry | `CCGJDOFMPUARLPQN43PINZMV2VDLXTLPOCGJ7SYIVYJHWHMTLO7FG57C` |
+| Trusted-store policy | `CBNGZVLAVZWXG6XGHDLOWPGLZA3FPZSSH5GU3KJZTFGG2ZZUQ33CBFGV` |
+| Store registry | `CCGJDOFMPUARLPQN43PINZMV2VDLXTLPOCGJ7SYIVYJHWHMTLO7FG57C` |
 | Spending-limit policy | `CAMLQKBJZBLW2XMWWUSA66PCIJ6UMROY57FFVIIV4WWXZQEQLQRXH5XN` |
 | ed25519 verifier | `CAERXSDPAVY6H53I4UYMUUBMFVHJYZPULMUYCBTLDHTZTWJJCHNZBGNU` |
+| Demo-dollar token | `CAOXAIBVHPDEF2ENG64TDBPO2232B74HPQF5KRSVU3IHENSYCYT3B67O` |
 
-Example x402 payment from the smart account:
-[`a628cbc5…`](https://stellar.expert/explorer/testnet/tx/a628cbc5c0343413cf04be6200333f0b84149b6c46cb9a4ace16976166445ad6)
+Smart accounts are deployed per customer from wasm hash
+`04ca584b40766568b33d981f4f95c1061d304c0e25d45b7217cba006d7ba40e0`.
 
 ## Quick start
 
-Needs Node 24+ and pnpm.
+Needs Node 24+, pnpm, and the [Stellar CLI](https://developers.stellar.org/docs/tools/cli)
+with a funded `mandate-deployer` identity.
 
 ```bash
 pnpm install
@@ -88,9 +109,19 @@ pnpm install
 pnpm setup:testnet
 ```
 
-That creates merchant, agent and owner test accounts with USDC trustlines and
-writes them to `.env`. Then send testnet USDC to the `AGENT_ADDRESS` from
-https://faucet.circle.com (choose Stellar testnet).
+```bash
+scripts/deploy-contracts.sh
+```
+
+Put the printed contract ids in `.env` (skip this and the step above to reuse
+the deployed contracts listed above: copy their ids into `.env`).
+
+```bash
+pnpm setup:demo
+```
+
+That makes the vault key, uploads the smart-account code, creates the demo
+dollar, and sets up the three stores. It is safe to run again.
 
 In four terminals:
 
@@ -110,14 +141,43 @@ pnpm dev:receipts
 pnpm dev:web
 ```
 
-Open http://localhost:4020. From there you can add a shopper with a limit, send
-it shopping at the demo store (one item is over most limits, one comes from a
-look-alike store that isn't trusted), open the receipt or the blocked payment,
-and stop the shopper.
+Open http://localhost:4020, create a login, open your account and add money.
+Then add a shopper. To see the rules hold, open a shopper's **Test the rules**
+menu: it really tries to pay the look-alike store, or to buy something over its
+limit, and the account blocks it.
 
 In the apps, the people-facing words differ from the code on purpose: an agent
-is a **shopper**, a verified seller is a **trusted store**, a refused payment is
-**blocked**, and revoking a mandate is **stopping** a shopper.
+is a **shopper**, a mandate is a shopper's **rule**, a verified seller is a
+**trusted store**, a refused payment is **blocked**, and revoking a mandate is
+**stopping** a shopper.
+
+### Connect your AI assistant
+
+Add a shopper of kind **Your AI assistant** in the app. It shows a one-time code.
+Then, from the repository root:
+
+```bash
+claude mcp add mandate -- node apps/agent/src/mcp.ts
+```
+
+Ask Claude: *"Connect to Mandate with code ABCD-EFGH."* It makes its own key,
+stores it in `~/.mandate/agent.json`, and the service adds a rule for that key to
+your account. After that, ask it to buy things. Its tools are `check_budget`,
+`find_products`, `buy` and `check_request`.
+
+The same from a terminal:
+
+```bash
+pnpm agent connect ABCD-EFGH
+```
+
+```bash
+pnpm agent find herbs
+```
+
+```bash
+pnpm agent buy greenleaf/herbs
+```
 
 ### iPhone app
 
@@ -129,118 +189,27 @@ open apps/ios/Mandate.xcodeproj
 
 Pick an iPhone simulator and press Run. The simulator reaches the API at
 `http://localhost:4022` with no setup. On a real iPhone, set your team under
-Signing & Capabilities, then in the app open **You** and set the service
-address to your Mac's address on the same network (for example
-`http://192.168.1.20:4022`).
+Signing & Capabilities, then set the service address on the sign-in screen to
+your Mac's address on the same network (for example `http://192.168.1.20:4022`).
 
 Adding a shopper asks for Face ID or the passcode. In the simulator, turn it on
 with Features › Face ID › Enrolled, then Features › Face ID › Matching Face when
-prompted. A device with no passcode set skips the check.
-
-The same payment from the command line:
-
-```bash
-pnpm agent -- http://localhost:4021/herbs
-```
-
-With `PAYER_MODE=classic` (the default) the agent pays from its own account and
-no mandate is involved. Set `PAYER_MODE=smart-account` in `.env` to pay from the
-smart account under the agent's mandate, once the contracts are deployed and a
-mandate exists (next section).
-
-To test without USDC, charge and pay in testnet XLM's token contract instead:
-set both `MERCHANT_ASSET` and `AGENT_EXTRA_ASSET` to
-`CDLZFC3SYJYDZT7K67VZ75HPJVIEUVNIXF47ZG2FB2RMQQVU2HHGCYSC` and pass the same
-value as `--token` to the scripts below.
-
-## Contracts
-
-Needs Rust with the `wasm32v1-none` target and the Stellar CLI:
-
-```bash
-brew install rustup stellar-cli && rustup default stable && rustup target add wasm32v1-none
-```
-
-Homebrew's rustup is not put on your PATH automatically. Add this to `~/.zshrc`:
-
-```bash
-export PATH=/opt/homebrew/opt/rustup/bin:$PATH
-```
-
-```bash
-cd contracts && cargo test && stellar contract build
-```
-
-If the build fails with `ld: ... tapi error: malformed file ... unknown architecture`,
-the Command Line Tools are defaulting to a macOS SDK newer than their linker
-understands. Point the build at the SDK that matches your macOS version, for example:
-
-```bash
-export SDKROOT=/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk
-```
-
-```bash
-./scripts/deploy-contracts.sh
-```
-
-### Create a mandate
-
-1. Deploy the owner's smart account. The owner's key goes on the default rule
-   as an `External` signer (verifier contract + raw public key in hex):
-
-   ```bash
-   stellar contract deploy --network testnet --source mandate-deployer \
-     --wasm contracts/target/wasm32v1-none/release/mandate_account.wasm \
-     -- --name owner --policies '{}' \
-     --signers '[{"External": ["<ED25519_VERIFIER_ID>", "<owner public key, hex>"]}]'
-   ```
-
-   Put the printed id in `.env` as `SMART_ACCOUNT_ID`.
-
-2. Register the demo seller (the registry admin is the deployer identity):
-
-   ```bash
-   stellar contract invoke --network testnet --source mandate-deployer --id <SELLER_REGISTRY_ID> -- register --seller <MERCHANT_ADDRESS> --domain localhost:4021
-   ```
-
-3. Create the agent's mandate, signed by the owner. Defaults: USDC, limit 1 per day.
-
-   ```bash
-   node --env-file=.env scripts/create-mandate.ts --limit 5
-   ```
-
-   Put the printed rule id in `.env` as `AGENT_CONTEXT_RULE_ID`.
-
-4. Move funds from the owner's classic account into the smart account:
-
-   ```bash
-   node --env-file=.env scripts/fund-smart-account.ts --amount 10
-   ```
-
-5. Try the rules directly, without x402:
-
-   ```bash
-   node --env-file=.env scripts/agent-transfer.ts --to <MERCHANT_ADDRESS> --amount 1
-   ```
+prompted.
 
 ## Demo shortcuts to know about
 
-The dashboard is real against testnet, but three things are simplified:
+- **The service keeps the owner's key.** Each customer's owner key sits in the
+  service's encrypted vault, so "Allow once" and "Raise the limit" are one tap.
+  A real deployment signs those on the owner's phone with a passkey.
+- **Hosted shoppers' keys are in the vault too.** That's what lets them run on a
+  schedule. Assistants hold their own keys; the service never sees those.
+- **Demo dollars.** A Stellar asset we issue, not USDC: the USDC faucet needs a
+  captcha. "Add money" mints demo dollars into the account.
+- **Face ID guards the app, not the key.** See the first point.
 
-- **The API signs as the owner.** `apps/receipts` holds `OWNER_SECRET` so the
-  dashboard can create and revoke mandates without a wallet. A real deployment
-  has the owner sign with their own wallet or a passkey.
-- **The API holds agent keys.** "Send shopping" runs the agent's purchase from the
-  API, so it keeps each agent's key in its local database. A real agent holds its
-  own key.
-- **No sign-in.** The API has no authentication. Run it on localhost only.
-- **Face ID guards the app, not the key.** The iPhone app checks Face ID before
-  asking the API to add a shopper; the owner's signature still comes from the
-  API. A real deployment signs on the phone with a passkey.
-
-When a payment is refused, the network only says "not authorized". The reason
-shown ("Over its daily limit", "Not a trusted store") is worked out by the API
-from the mandate's limit and the seller registry.
+When a payment is blocked, the network only says "not authorized". The reason
+shown ("Over its $10 weekly limit", "Not a trusted store") is worked out by the
+service from the shopper's rule and the store registry.
 
 ## What we learned about x402 and smart accounts
 
@@ -270,6 +239,8 @@ Other things worth knowing:
 
 ## Credits
 
+The service's Stellar layer (encrypted key vault, command journal, idempotent
+transaction submission, workspace store) is by Jacob Abraham.
 Smart account, verifier and spending-limit code come from
 [OpenZeppelin Stellar Contracts](https://github.com/OpenZeppelin/stellar-contracts) (MIT).
 Payments use [x402](https://developers.stellar.org/docs/build/agentic-payments/x402).
