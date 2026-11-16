@@ -6,22 +6,25 @@ interface DialogProps {
   title: string;
   onClose: () => void;
   children: ReactNode;
-  /** Extra class on the panel, e.g. for the receipt's narrower width. */
-  className?: string;
+  /** "sheet" is one glass panel; "bare" leaves the glass to the content (the receipt). */
+  variant?: "sheet" | "bare";
 }
 
-export function Dialog({ title, onClose, children, className }: DialogProps) {
+export function Dialog({ title, onClose, children, variant = "sheet" }: DialogProps) {
   const panel = useRef<HTMLDivElement>(null);
+  // The latest onClose, without re-running the effect below on every render.
+  const close = useRef(onClose);
+  close.current = onClose;
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") onClose();
+      if (event.key === "Escape") close.current();
     };
     document.addEventListener("keydown", onKey);
-    // Keep keyboard focus inside the dialog from the start.
-    panel.current?.focus();
+    // Keep keyboard focus inside the dialog from the start, unless a field already took it.
+    if (!panel.current?.contains(document.activeElement)) panel.current?.focus();
     return () => document.removeEventListener("keydown", onKey);
-  }, [onClose]);
+  }, []);
 
   return (
     <div
@@ -32,17 +35,18 @@ export function Dialog({ title, onClose, children, className }: DialogProps) {
     >
       <div
         ref={panel}
-        className={`dialog ${className ?? ""}`}
+        className={`dialog is-${variant}`}
         role="dialog"
         aria-modal="true"
         aria-label={title}
         tabIndex={-1}
       >
         <header className="dialog-header">
-          <h2>{title}</h2>
           <button className="icon-button" onClick={onClose} aria-label="Close">
-            <CloseIcon size={18} />
+            <CloseIcon size={20} />
           </button>
+          <h2>{title}</h2>
+          <span className="dialog-header-spacer" aria-hidden="true" />
         </header>
         {children}
       </div>

@@ -8,3 +8,8 @@ dist/
 contracts/target/
 .DS_Store
 .claude/
+
+# Xcode
+xcuserdata/
+*.xcuserstate
+DerivedData/

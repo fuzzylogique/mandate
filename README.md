@@ -36,11 +36,12 @@ those checks. Off-chain: what was bought, names, emails.
 | `contracts/spending-limit-policy` | Cap per rolling window. OpenZeppelin wrapper. |
 | `contracts/seller-registry` | Verified seller accounts and their domains. Ours. |
 | `contracts/verified-seller-policy` | Rejects payments to unregistered sellers; emits the receipt event. Ours. |
-| `apps/merchant` | Demo seller: a paid API behind x402. A fixture, not the product. |
+| `apps/merchant` | Demo store: sells over x402. A fixture, not the product. |
 | `apps/agent` | Buyer agent: pays for a URL over x402, from its own account or from the smart account. |
 | `apps/facilitator` | Our own x402 facilitator. Needed for smart-account payments (see below). |
 | `apps/receipts` | Dashboard API: indexes payments into receipts, reads balance and mandates from chain, creates and revokes mandates, runs demo purchases, records refusals. |
-| `apps/web` | Owner dashboard: balance, agents and their limits, activity with receipts and declined payments. |
+| `apps/web` | The owner's web app: balance, shoppers and their limits, activity with receipts and blocked payments. |
+| `apps/ios` | The owner's iPhone app (SwiftUI): the same account, with Face ID before a shopper is given money to spend. |
 | `packages/shared` | Types shared by the TypeScript packages. |
 | `scripts/` | Testnet setup, contract deployment, mandate creation, funding, direct transfer test. |
 
@@ -57,7 +58,8 @@ payment token (the USDC faucet needs a captcha, so USDC itself is untested):
 | Agent pays an unverified recipient | Refused by the account's contracts. |
 | Agent exceeds its limit | Refused by the account's contracts, directly and through x402. |
 | Receipts | Each payment is indexed from chain into a receipt, with what was bought attached. |
-| Dashboard | Works against testnet (checked in a browser): create an agent with a limit, send it to buy, see the receipt or the declined payment and why, revoke an agent. |
+| Web app | Works against testnet (checked in a browser): add a shopper with a limit, send it shopping, see the receipt or the blocked payment and why, stop a shopper. |
+| iPhone app | Works against testnet (checked in the iOS Simulator): the same flows, plus Face ID or passcode before a shopper is added. |
 | Owner sign-in, receipt email | Not started. |
 | Seller verification against `stellar.toml` | Not started; sellers are registered by hand. |
 
@@ -108,15 +110,37 @@ pnpm dev:receipts
 pnpm dev:web
 ```
 
-Open http://localhost:4020. From the dashboard you can create an agent with a
-spending limit, send it to buy something from the demo seller (one item is over
-most limits, one comes from an unverified look-alike seller), open the receipt
-or the declined payment, and revoke the agent.
+Open http://localhost:4020. From there you can add a shopper with a limit, send
+it shopping at the demo store (one item is over most limits, one comes from a
+look-alike store that isn't trusted), open the receipt or the blocked payment,
+and stop the shopper.
+
+In the apps, the people-facing words differ from the code on purpose: an agent
+is a **shopper**, a verified seller is a **trusted store**, a refused payment is
+**blocked**, and revoking a mandate is **stopping** a shopper.
+
+### iPhone app
+
+Needs Xcode 26 or later. With the services above running:
+
+```bash
+open apps/ios/Mandate.xcodeproj
+```
+
+Pick an iPhone simulator and press Run. The simulator reaches the API at
+`http://localhost:4022` with no setup. On a real iPhone, set your team under
+Signing & Capabilities, then in the app open **You** and set the service
+address to your Mac's address on the same network (for example
+`http://192.168.1.20:4022`).
+
+Adding a shopper asks for Face ID or the passcode. In the simulator, turn it on
+with Features › Face ID › Enrolled, then Features › Face ID › Matching Face when
+prompted. A device with no passcode set skips the check.
 
 The same payment from the command line:
 
 ```bash
-pnpm agent -- http://localhost:4021/weather
+pnpm agent -- http://localhost:4021/herbs
 ```
 
 With `PAYER_MODE=classic` (the default) the agent pays from its own account and
@@ -206,14 +230,17 @@ The dashboard is real against testnet, but three things are simplified:
 - **The API signs as the owner.** `apps/receipts` holds `OWNER_SECRET` so the
   dashboard can create and revoke mandates without a wallet. A real deployment
   has the owner sign with their own wallet or a passkey.
-- **The API holds agent keys.** "Send to buy" runs the agent's purchase from the
+- **The API holds agent keys.** "Send shopping" runs the agent's purchase from the
   API, so it keeps each agent's key in its local database. A real agent holds its
   own key.
 - **No sign-in.** The API has no authentication. Run it on localhost only.
+- **Face ID guards the app, not the key.** The iPhone app checks Face ID before
+  asking the API to add a shopper; the owner's signature still comes from the
+  API. A real deployment signs on the phone with a passkey.
 
 When a payment is refused, the network only says "not authorized". The reason
-shown ("Over the daily spending limit", "Seller is not verified") is worked out
-by the API from the mandate's limit and the seller registry.
+shown ("Over its daily limit", "Not a trusted store") is worked out by the API
+from the mandate's limit and the seller registry.
 
 ## What we learned about x402 and smart accounts
 

@@ -85,17 +85,17 @@ if (env.VERIFIED_SELLER_POLICY_ID) {
 // Display names for sellers. Whether a seller is verified always comes from
 // the on-chain registry, never from this table.
 if (env.MERCHANT_ADDRESS) {
-  store.upsertSeller({ address: env.MERCHANT_ADDRESS, name: "Northwind Weather", domain: "northwind.example" });
+  store.upsertSeller({ address: env.MERCHANT_ADDRESS, name: "FreshMart", domain: "freshmart.example" });
 }
 if (env.IMPOSTOR_ADDRESS) {
-  // A look-alike seller that is NOT in the registry, to show a refusal.
-  store.upsertSeller({ address: env.IMPOSTOR_ADDRESS, name: "Northwlnd Weather", domain: "northwlnd.example" });
+  // A look-alike store that is NOT in the registry, to show a blocked payment.
+  store.upsertSeller({ address: env.IMPOSTOR_ADDRESS, name: "FreshMarrt", domain: "freshmarrt.example" });
 }
 
 /** First run: adopt mandates created from the command line. */
 async function adoptExistingMandates(): Promise<void> {
   if (!chain || !env.AGENT_SECRET || store.agents().length > 0) return;
-  const names = ["Procurement bot", "Research assistant"];
+  const names = ["Supplies", "Research"];
   for (const [index, name] of names.entries()) {
     const ruleId = index + 1;
     if (await chain.mandate(ruleId)) {
@@ -126,21 +126,44 @@ async function sellerView(address: string): Promise<Seller> {
   };
 }
 
+// Records written before the rewording keep their original text in the
+// database; they are shown in today's words.
+const EARLIER_WORDING: Record<string, string> = {
+  "Weather report": "Fresh herbs bundle",
+  "Premium market report": "Commercial stand mixer",
+  "Seller is not verified": "Not a trusted store",
+  "This agent's access was revoked": "This shopper was stopped",
+  "Over the daily spending limit": "Over its daily limit",
+  "Over the weekly spending limit": "Over its weekly limit",
+  "Over the monthly spending limit": "Over its monthly limit",
+  "Over the spending limit": "Over its limit",
+  "Refused by the account's rules": "Blocked by your account's rules",
+  Refused: "Blocked",
+};
+const EARLIER_NAMES: Record<string, string> = {
+  "Procurement bot": "Supplies",
+  "Research assistant": "Research",
+  "Travel booker": "Travel",
+  "Grocery Shopper": "Groceries",
+};
+const today = (text: string) => EARLIER_WORDING[text] ?? text;
+const shopperName = (name: string) => EARLIER_NAMES[name] ?? name;
+
 async function catalog(): Promise<CatalogItem[]> {
   const items: CatalogItem[] = [];
   if (env.MERCHANT_ADDRESS) {
     const seller = await sellerView(env.MERCHANT_ADDRESS);
     items.push(
-      { id: "weather", title: "Weather report", seller, price: "0.01" },
-      { id: "premium-report", title: "Premium market report", seller, price: "5" },
+      { id: "herbs", title: "Fresh herbs bundle", seller, price: "2.4" },
+      { id: "mixer", title: "Commercial stand mixer", seller, price: "120" },
     );
   }
   if (env.IMPOSTOR_ADDRESS) {
     items.push({
-      id: "impostor/weather",
-      title: "Weather report",
+      id: "lookalike/herbs",
+      title: "Fresh herbs bundle",
       seller: await sellerView(env.IMPOSTOR_ADDRESS),
-      price: "0.01",
+      price: "2.4",
     });
   }
   return items;
@@ -149,7 +172,7 @@ async function catalog(): Promise<CatalogItem[]> {
 async function mandateView(ruleId: number): Promise<Mandate | null> {
   const agent = store.agent(ruleId);
   if (!agent || !chain) return null;
-  const base = { ruleId, name: agent.name, token: tokenInfo(agent.token), createdAt: agent.createdAt };
+  const base = { ruleId, name: shopperName(agent.name), token: tokenInfo(agent.token), createdAt: agent.createdAt };
   const onChain = agent.revokedAt ? null : await chain.mandate(ruleId);
   if (!onChain) {
     if (!agent.revokedAt) store.markRevoked(ruleId, new Date().toISOString());
@@ -182,13 +205,15 @@ async function overview(): Promise<Overview> {
 }
 
 async function activity(): Promise<Activity[]> {
-  const agentName = (ruleId: number) => store.agent(ruleId)?.name ?? `Agent ${ruleId}`;
+  const agentName = (ruleId: number) => shopperName(store.agent(ruleId)?.name ?? `Shopper ${ruleId}`);
   const items = await catalog();
   // Payments made from the command line carry only the URL that was bought.
   const itemFor = (annotation: ReceiptAnnotation | null) =>
-    annotation?.description ??
-    items.find((item) => annotation?.resource.endsWith(`/${item.id}`))?.title ??
-    "Payment";
+    today(
+      annotation?.description ??
+        items.find((item) => annotation?.resource.endsWith(`/${item.id}`))?.title ??
+        "Purchase",
+    );
   const paid = await Promise.all(
     store.list(env.SMART_ACCOUNT_ID).map(async (receipt): Promise<Activity> => ({
       id: receipt.id,
@@ -209,10 +234,10 @@ async function activity(): Promise<Activity[]> {
       at: decline.at,
       agent: { ruleId: decline.ruleId, name: agentName(decline.ruleId) },
       seller: await sellerView(decline.seller),
-      item: decline.item,
+      item: today(decline.item),
       amount: decline.amount,
       token: tokenInfo(decline.token),
-      reason: decline.reason,
+      reason: today(decline.reason),
     })),
   );
   return [...paid, ...declined].sort((a, b) => b.at.localeCompare(a.at));
@@ -231,10 +256,10 @@ class HttpError extends Error {
 async function createMandate(body: { name?: string; limit?: string; period?: string }): Promise<Mandate> {
   if (!chain) throw new HttpError(503, "Contracts are not configured in .env");
   const name = body.name?.trim() ?? "";
-  if (!name) throw new HttpError(400, "Give the agent a name");
+  if (!name) throw new HttpError(400, "Give your shopper a name");
   if (Buffer.byteLength(name) > MAX_NAME_BYTES) throw new HttpError(400, "Name must be 20 characters or fewer");
   if (!body.limit || !/^\d+(\.\d{1,7})?$/.test(body.limit) || Number(body.limit) <= 0) {
-    throw new HttpError(400, "Enter a spending limit greater than zero");
+    throw new HttpError(400, "Enter a limit greater than zero");
   }
   const period = body.period as MandatePeriod;
   if (!(period in PERIOD_LEDGERS)) throw new HttpError(400, "Choose a period");
@@ -251,20 +276,22 @@ async function createMandate(body: { name?: string; limit?: string; period?: str
   });
   store.addAgent({ ruleId, name, secret: agent.secret(), token: tokenId, createdAt: new Date().toISOString() });
   const mandate = await mandateView(ruleId);
-  if (!mandate) throw new HttpError(500, "Mandate was created but could not be read back");
+  if (!mandate) throw new HttpError(500, "Your shopper was set up but could not be read back");
   return mandate;
 }
 
-/** Why the account refused, in plain words. The chain itself only says "no". */
+/** Why the account said no, in plain words. The chain itself only says "no". */
 async function explainRefusal(ruleId: number, item: CatalogItem, amount: bigint): Promise<string> {
-  if (!chain) return "Refused";
-  if (!(await chain.isVerifiedSeller(item.seller.address))) return "Seller is not verified";
+  if (!chain) return "Blocked";
+  if (!(await chain.isVerifiedSeller(item.seller.address))) return "Not a trusted store";
   const mandate = await chain.mandate(ruleId);
-  if (!mandate) return "This agent's access was revoked";
+  if (!mandate) return "This shopper was stopped";
   if (mandate.spent + amount > mandate.limit) {
-    return mandate.period ? `Over the ${mandate.period === "day" ? "daily" : `${mandate.period}ly`} spending limit` : "Over the spending limit";
+    return mandate.period ? `Over its ${mandate.period === "day" ? "daily" : `${mandate.period}ly`} limit` : "Over its limit";
   }
-  return "Refused by the account's rules";
+  const balance = await chain.balance(tokenId).catch(() => null);
+  if (balance !== null && balance < amount) return "Not enough money in your account";
+  return "Blocked by your account's rules";
 }
 
 async function purchase(body: { ruleId?: number; itemId?: string }): Promise<PurchaseResult> {
@@ -273,7 +300,7 @@ async function purchase(body: { ruleId?: number; itemId?: string }): Promise<Pur
   }
   const agent = body.ruleId === undefined ? undefined : store.agent(body.ruleId);
   const item = (await catalog()).find((entry) => entry.id === body.itemId);
-  if (!agent || !item) throw new HttpError(400, "Unknown agent or item");
+  if (!agent || !item) throw new HttpError(400, "Unknown shopper or item");
 
   const amount = BigInt(toBaseUnits(item.price));
   const payingFetch = createPayingFetch({
@@ -352,7 +379,7 @@ app.post("/mandates", async (req, res) => {
 app.delete("/mandates/:ruleId", async (req, res) => {
   if (!chain) throw new HttpError(503, "Contracts are not configured in .env");
   const ruleId = Number(req.params.ruleId);
-  if (!store.agent(ruleId)) throw new HttpError(404, "Unknown agent");
+  if (!store.agent(ruleId)) throw new HttpError(404, "Unknown shopper");
   await chain.revokeMandate(ruleId);
   store.markRevoked(ruleId, new Date().toISOString());
   res.status(204).end();

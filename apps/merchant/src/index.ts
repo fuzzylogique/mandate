@@ -1,5 +1,5 @@
-// Demo seller: a paid API behind x402. It stands in for any service an agent
-// might buy from. It is a fixture for the demo, not part of the product.
+// Demo store: a shop that takes payment over x402. It stands in for anywhere a
+// shopper might buy from. It is a fixture for the demo, not part of the product.
 import express from "express";
 import { HTTPFacilitatorClient } from "@x402/core/server";
 import { paymentMiddleware, x402ResourceServer } from "@x402/express";
@@ -17,8 +17,8 @@ const facilitatorUrl = process.env.FACILITATOR_URL ?? "https://x402.org/facilita
 const asset = process.env.MERCHANT_ASSET;
 const price = (usd: string, baseUnits: string) => (asset ? { amount: baseUnits, asset } : usd);
 
-// A second, look-alike seller that is not in the seller registry. The agent's
-// mandate should refuse to pay it. Demo fixture only.
+// A second, look-alike store that is not in the seller registry. The shopper's
+// rules should refuse to pay it. Demo fixture only.
 const impostorPayTo = process.env.IMPOSTOR_ADDRESS;
 
 const resourceServer = new x402ResourceServer(
@@ -30,22 +30,22 @@ const app = express();
 app.use(
   paymentMiddleware(
     {
-      "GET /weather": {
-        accepts: [{ scheme: "exact", price: price("$0.01", "100000"), network: NETWORK, payTo }],
-        description: "Current weather report",
+      "GET /herbs": {
+        accepts: [{ scheme: "exact", price: price("$2.40", "24000000"), network: NETWORK, payTo }],
+        description: "Fresh herbs bundle",
       },
-      "GET /premium-report": {
-        // Priced above the demo mandate's limit, to show a blocked payment.
-        accepts: [{ scheme: "exact", price: price("$5.00", "50000000"), network: NETWORK, payTo }],
-        description: "Premium market report",
+      "GET /mixer": {
+        // Priced above a typical limit, to show a blocked payment.
+        accepts: [{ scheme: "exact", price: price("$120.00", "1200000000"), network: NETWORK, payTo }],
+        description: "Commercial stand mixer",
       },
       ...(impostorPayTo
         ? {
-            "GET /impostor/weather": {
+            "GET /lookalike/herbs": {
               accepts: [
-                { scheme: "exact" as const, price: price("$0.01", "100000"), network: NETWORK, payTo: impostorPayTo },
+                { scheme: "exact" as const, price: price("$2.40", "24000000"), network: NETWORK, payTo: impostorPayTo },
               ],
-              description: "Current weather report",
+              description: "Fresh herbs bundle",
             },
           }
         : {}),
@@ -54,16 +54,18 @@ app.use(
   ),
 );
 
-app.get("/weather", (_req, res) => {
-  res.json({ city: "Waterloo", tempC: 4, conditions: "overcast" });
+const order = (item: string) => ({ order: "confirmed", item, pickup: "Tomorrow, 8 am" });
+
+app.get("/herbs", (_req, res) => {
+  res.json(order("Fresh herbs bundle"));
 });
 
-app.get("/impostor/weather", (_req, res) => {
-  res.json({ city: "Waterloo", tempC: 4, conditions: "overcast" });
+app.get("/lookalike/herbs", (_req, res) => {
+  res.json(order("Fresh herbs bundle"));
 });
 
-app.get("/premium-report", (_req, res) => {
-  res.json({ report: "Premium content the demo agent should not be able to afford." });
+app.get("/mixer", (_req, res) => {
+  res.json(order("Commercial stand mixer"));
 });
 
 app.get("/health", (_req, res) => {

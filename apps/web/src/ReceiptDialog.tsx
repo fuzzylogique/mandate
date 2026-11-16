@@ -1,95 +1,101 @@
-// The receipt for one agent payment, or the record of one refused attempt.
+// The receipt for one purchase, drawn as a pass, or the record of one blocked payment.
 import type { Activity, Mandate } from "@mandate/shared";
 import { Dialog } from "./Dialog.tsx";
-import { fullDate, money, ruleSummary } from "./format.ts";
-import { BlockedIcon, CheckIcon, ExternalIcon, ShieldIcon } from "./icons.tsx";
+import { fullDate, moneyParts, periodWords, roundMoney } from "./format.ts";
+import { CheckIcon, ShieldIcon } from "./icons.tsx";
 
-const EXPLORER_TX = "https://stellar.expert/explorer/testnet/tx/";
+const PROOF_URL = "https://stellar.expert/explorer/testnet/tx/";
 
 interface ReceiptDialogProps {
   item: Activity;
-  /** The agent's mandate, if it is still known. */
-  mandate: Mandate | undefined;
+  /** The shopper that paid, if it is still known. */
+  shopper: Mandate | undefined;
   ownerName: string;
   onClose: () => void;
 }
 
-export function ReceiptDialog({ item, mandate, ownerName, onClose }: ReceiptDialogProps) {
-  const declined = item.kind === "declined";
+function ruleLine(shopper: Mandate | undefined): string | null {
+  if (!shopper) return null;
+  if (shopper.status === "revoked" || shopper.limit === null) return "Shopper since stopped";
+  return `${roundMoney(shopper.limit, shopper.token)} ${periodWords(shopper.period).a}`;
+}
+
+export function ReceiptDialog({ item, shopper, ownerName, onClose }: ReceiptDialogProps) {
+  const blocked = item.kind === "declined";
+  const amount = moneyParts(item.amount, item.token);
+  const rule = ruleLine(shopper);
+
   return (
-    <Dialog title={declined ? "Declined payment" : "Receipt"} onClose={onClose} className="receipt">
-      <div className="receipt-top">
-        <span className={`receipt-badge ${declined ? "is-declined" : "is-paid"}`}>
-          {declined ? <BlockedIcon size={22} /> : <CheckIcon size={22} />}
-        </span>
-        <p className={`receipt-amount ${declined ? "is-declined" : ""}`}>
-          {money(item.amount, item.token)}
-        </p>
-        <p className="receipt-status">
-          {declined ? "Declined. No money left your account." : `Paid to ${item.seller.name}`}
-        </p>
-      </div>
-
-      <dl className="receipt-lines">
-        {declined && (
-          <div className="is-emphasis">
-            <dt>Reason</dt>
-            <dd>{item.reason}</dd>
-          </div>
-        )}
-        <div>
-          <dt>Date</dt>
-          <dd>{fullDate(item.at)}</dd>
-        </div>
-        <div>
-          <dt>Item</dt>
-          <dd>{item.item}</dd>
-        </div>
-        <div>
-          <dt>Seller</dt>
-          <dd>
-            {item.seller.name}
-            {item.seller.domain && <span className="muted"> · {item.seller.domain}</span>}
-            <br />
-            {item.seller.verified ? (
-              <span className="verified is-labelled">
-                <ShieldIcon size={14} /> Verified seller
-              </span>
-            ) : (
-              <em className="tag is-danger">Not a verified seller</em>
-            )}
-          </dd>
-        </div>
-        <div>
-          <dt>{declined ? "Attempted by" : "Bought by"}</dt>
-          <dd>{item.agent.name}</dd>
-        </div>
-        <div>
-          <dt>{declined ? "On behalf of" : "Authorized by"}</dt>
-          <dd>{ownerName}</dd>
-        </div>
-        {mandate && (
-          <div>
-            <dt>Agent's rules</dt>
-            <dd>{ruleSummary(mandate)}</dd>
-          </div>
-        )}
-      </dl>
-
-      <footer className="receipt-footer">
-        {item.txHash ? (
-          <>
-            <span className="muted">Recorded on the Stellar network</span>
-            <a href={`${EXPLORER_TX}${item.txHash}`} target="_blank" rel="noreferrer">
-              View proof <ExternalIcon size={14} />
-            </a>
-          </>
-        ) : (
-          <span className="muted">
-            Your account's rules refused this before any payment was sent.
+    <Dialog title={blocked ? "Blocked payment" : "Receipt"} onClose={onClose} variant="bare">
+      <div className={`pass ${blocked ? "is-blocked" : ""}`}>
+        <div className="glass pass-top">
+          <span className="store-disc" aria-hidden="true">
+            {item.seller.name.trim()[0]?.toUpperCase() ?? "?"}
           </span>
-        )}
-      </footer>
+          <p className="pass-store">{item.seller.name}</p>
+          {item.seller.verified ? (
+            <p className="pass-trust is-trusted">
+              <ShieldIcon size={16} /> Trusted store
+            </p>
+          ) : (
+            <p className="pass-trust is-not">Not a trusted store</p>
+          )}
+          <p className="pass-amount">
+            {amount.lead}
+            <span className="cents">{amount.tail}</span>
+          </p>
+          <p className="quiet">{fullDate(item.at)}</p>
+          {blocked && <p className="pass-verdict">Blocked. Your money didn't move.</p>}
+        </div>
+
+        <div className="glass pass-bottom">
+          <dl className="pass-rows">
+            {blocked && (
+              <div>
+                <dt>Why</dt>
+                <dd>{item.reason ?? "Blocked by your account's rules"}</dd>
+              </div>
+            )}
+            <div>
+              <dt>For</dt>
+              <dd>{item.item}</dd>
+            </div>
+            <div>
+              <dt>{blocked ? "Tried by" : "Paid by"}</dt>
+              <dd>{item.agent.name}</dd>
+            </div>
+            <div>
+              <dt>{blocked ? "On behalf of" : "Allowed by"}</dt>
+              <dd>{ownerName}</dd>
+            </div>
+            {rule && (
+              <div>
+                <dt>Under the rule</dt>
+                <dd>{rule}</dd>
+              </div>
+            )}
+          </dl>
+
+          {!blocked && item.txHash && (
+            <div className="seal-row">
+              <span className="seal" aria-hidden="true">
+                <span className="seal-core">
+                  <CheckIcon size={24} />
+                </span>
+              </span>
+              <div>
+                <p className="seal-title">Sealed</p>
+                <p className="quiet">
+                  Nobody can edit or fake this receipt, not even us.{" "}
+                  <a href={`${PROOF_URL}${item.txHash}`} target="_blank" rel="noreferrer">
+                    See the proof
+                  </a>
+                </p>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
     </Dialog>
   );
 }
