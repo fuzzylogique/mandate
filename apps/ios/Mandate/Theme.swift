@@ -154,25 +154,100 @@ struct Wordmark: View {
 struct ActivityRow: View {
     let item: Activity
 
+    private var title: String {
+        if item.added { return "Money added" }
+        if item.blocked { return "Blocked: \(item.storeName)" }
+        return item.storeName
+    }
+
+    private var detail: String {
+        let when = Dates.short(item.date)
+        if item.added { return "From your bank, \(when)" }
+        if item.blocked { return "\(item.reason ?? "Nothing was paid"), \(when)" }
+        let who = item.byYou ? "You, for \(item.shopper?.name ?? "a shopper")" : (item.shopper?.name ?? "A shopper")
+        return "\(item.item) · \(who), \(when)"
+    }
+
     var body: some View {
         HStack(spacing: 12) {
+            Image(systemName: item.added ? "arrow.down.to.line" : item.blocked ? "hand.raised.fill" : "bag")
+                .font(.system(size: 15, weight: .medium))
+                .foregroundStyle(item.blocked ? Color.blocked : item.added ? Color.trusted : .white)
+                .frame(width: 34, height: 34)
+                .background(.white.opacity(0.1), in: .circle)
             VStack(alignment: .leading, spacing: 2) {
-                Text(item.blocked ? "Blocked: \(item.seller.name)" : item.seller.name)
+                Text(title)
                     .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(item.blocked ? Color.blocked : .white)
-                Text(item.blocked ? "\(item.reason ?? "Nothing was paid"), \(Dates.short(item.date))" : "\(item.agent.name), \(Dates.short(item.date))")
+                Text(detail)
                     .font(.system(size: 12))
                     .foregroundStyle(Color.soft)
             }
             Spacer(minLength: 8)
-            Text(item.money.text)
+            Text(item.added ? "+\(item.money.text)" : item.money.text)
                 .font(.system(size: 16, weight: .medium))
-                .foregroundStyle(item.blocked ? Color.blocked : .white)
+                .foregroundStyle(item.blocked ? Color.blocked : item.added ? Color.trusted : .white)
                 .strikethrough(item.blocked)
         }
         .lineLimit(1)
-        .frame(minHeight: 60)
+        .frame(minHeight: 62)
         .contentShape(.rect)
+    }
+}
+
+/// Spent against a limit, as a thin bar.
+struct SpendBar: View {
+    let share: Double
+    let color: Color
+
+    var body: some View {
+        GeometryReader { proxy in
+            ZStack(alignment: .leading) {
+                Capsule().fill(.white.opacity(0.16))
+                Capsule()
+                    .fill(share >= 1 ? Color.blocked : color)
+                    .frame(width: max(6, proxy.size.width * min(1, share)))
+                    .animation(.smooth(duration: 0.6), value: share)
+            }
+        }
+        .frame(height: 6)
+        .accessibilityHidden(true)
+    }
+}
+
+/// A small glass chip with a word in it, e.g. a status.
+struct Chip: View {
+    let text: String
+    var color: Color = .white
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(color)
+            .padding(.horizontal, 10)
+            .frame(height: 24)
+            .background(color.opacity(0.14), in: .capsule)
+    }
+}
+
+/// A section heading on a screen.
+struct SectionHeading: View {
+    let text: String
+    var count: Int?
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(text)
+                .font(.system(size: 18, weight: .semibold))
+            if let count, count > 0 {
+                Text("\(count)")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(Color.ink)
+                    .frame(minWidth: 22, minHeight: 22)
+                    .background(Color.blocked, in: .capsule)
+            }
+            Spacer()
+        }
     }
 }
 
@@ -212,9 +287,16 @@ struct FlowLayout: Layout {
         for (index, point) in result.points.enumerated() {
             subviews[index].place(
                 at: CGPoint(x: bounds.minX + point.x, y: bounds.minY + point.y),
-                proposal: .unspecified
+                proposal: Self.proposal(for: subviews[index], width: bounds.width)
             )
         }
+    }
+
+    /// A piece wider than the whole line is offered the line's width, so it can shrink to fit.
+    private static func proposal(for subview: LayoutSubview, width: CGFloat) -> ProposedViewSize {
+        let ideal = subview.sizeThatFits(.unspecified)
+        guard width.isFinite, ideal.width > width else { return .unspecified }
+        return ProposedViewSize(width: width, height: ideal.height)
     }
 
     private func arrange(width: CGFloat, subviews: Subviews) -> (points: [CGPoint], width: CGFloat, height: CGFloat) {
@@ -224,7 +306,7 @@ struct FlowLayout: Layout {
         var widest: CGFloat = 0
         var points: [CGPoint] = []
         for subview in subviews {
-            let size = subview.sizeThatFits(.unspecified)
+            let size = subview.sizeThatFits(Self.proposal(for: subview, width: width))
             if x > 0, x + size.width > width {
                 x = 0
                 y += rowHeight + lineSpacing

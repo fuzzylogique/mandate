@@ -1,8 +1,10 @@
-// Mandate for iPhone: see what your shoppers spend, and decide what they may.
+// Mandate for iPhone: give shoppers spending rules, and only deal with the exceptions.
 import SwiftUI
+import UserNotifications
 
 @main
 struct MandateApp: App {
+    @UIApplicationDelegateAdaptor(AppDelegate.self) private var delegate
     @State private var store = AppStore()
 
     var body: some Scene {
@@ -11,8 +13,20 @@ struct MandateApp: App {
                 .environment(store)
                 .preferredColorScheme(.dark)
                 .tint(.white)
-                .task { store.start() }
+                .task { await store.resume() }
         }
+    }
+}
+
+/// Lets a request notification show while the app is open, too.
+final class AppDelegate: NSObject, UIApplicationDelegate, UNUserNotificationCenterDelegate {
+    func application(_ application: UIApplication, didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil) -> Bool {
+        UNUserNotificationCenter.current().delegate = self
+        return true
+    }
+
+    func userNotificationCenter(_ center: UNUserNotificationCenter, willPresent notification: UNNotification) async -> UNNotificationPresentationOptions {
+        [.banner, .sound, .list]
     }
 }
 
@@ -22,6 +36,46 @@ enum AppTab: Hashable {
 
 struct RootView: View {
     @Environment(AppStore.self) private var store
+    @Environment(\.scenePhase) private var scenePhase
+
+    var body: some View {
+        Group {
+            switch store.phase {
+            case .launching:
+                ZStack {
+                    LightField()
+                    VStack(spacing: 18) {
+                        Wordmark()
+                        ProgressView()
+                    }
+                }
+            case .signedOut:
+                SignInView()
+            case .signedIn:
+                if store.settingUp {
+                    SetupView()
+                } else {
+                    // A fresh set of tabs for each person who signs in.
+                    MainTabs().id(store.customer?.id)
+                }
+            }
+        }
+        .animation(.smooth(duration: 0.35), value: store.phase)
+        .animation(.smooth(duration: 0.35), value: store.settingUp)
+        .onChange(of: scenePhase) { _, next in
+            guard store.phase == .signedIn else { return }
+            if next == .active {
+                store.start()
+                Task { await store.refresh() }
+            } else if next == .background {
+                store.stop()
+            }
+        }
+    }
+}
+
+struct MainTabs: View {
+    @Environment(AppStore.self) private var store
     @State private var tab: AppTab = .home
 
     var body: some View {
@@ -29,6 +83,7 @@ struct RootView: View {
             Tab("Home", systemImage: "house", value: AppTab.home) {
                 HomeView(tab: $tab)
             }
+            .badge(store.requests.count)
             Tab("Shoppers", systemImage: "person.2", value: AppTab.shoppers) {
                 ShoppersView()
             }

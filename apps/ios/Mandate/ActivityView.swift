@@ -1,4 +1,4 @@
-// Everything your shoppers did with your money: what they paid, and what was blocked.
+// Everything that happened to your money: what shoppers paid, what was blocked, and money added.
 import SwiftUI
 
 struct ActivityView: View {
@@ -18,7 +18,7 @@ struct ActivityView: View {
                     .padding(.top, 8)
 
                 if store.activity.isEmpty {
-                    Text("Purchases your shoppers make will show up here, each with its receipt.")
+                    Text("Purchases, blocked payments and money you add show up here, each with its receipt.")
                         .font(.system(size: 15))
                         .foregroundStyle(Color.soft)
                         .padding(20)
@@ -35,6 +35,8 @@ struct ActivityView: View {
                 }
             }
         }
+        // Before the sheets, so pull-to-refresh does not leak into them.
+        .refreshable { await store.refresh() }
         .sheet(item: $openReceipt) { ReceiptView(item: $0) }
     }
 

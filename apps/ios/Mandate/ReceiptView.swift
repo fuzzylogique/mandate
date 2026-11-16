@@ -1,4 +1,6 @@
-// The receipt for one purchase, drawn as a pass, or the record of one that was blocked.
+// The receipt for one purchase, drawn as a pass, or the record of one that was
+// blocked, or of money added. The proof section is where the account's own
+// record lives: the rule, the shopper's key, and a link to look it up.
 import SwiftUI
 
 struct ReceiptView: View {
@@ -6,25 +8,29 @@ struct ReceiptView: View {
     @Environment(\.dismiss) private var dismiss
     let item: Activity
     @State private var topHeight: CGFloat = 250
+    @State private var showingProof = false
 
-    private var proof: URL? {
-        item.txHash.flatMap { URL(string: "https://stellar.expert/explorer/testnet/tx/\($0)") }
+    private var link: URL? { item.explorerUrl.flatMap(URL.init(string:)) }
+
+    private var title: String {
+        if item.added { return "Money added" }
+        return item.blocked ? "Blocked payment" : "Receipt"
     }
 
-    private var ruleLine: String {
-        guard let shopper = store.shopper(item.agent.ruleId), shopper.isActive,
-              let limit = shopper.limitMoney, let left = shopper.leftMoney
-        else { return "Since stopped" }
-        return "\(limit.short) a \(shopper.period ?? "day"), \(left.short) left"
+    private var ruleLine: String? {
+        guard let id = item.shopper?.id, let shopper = store.shopper(id) else { return nil }
+        guard shopper.isActive else { return "Since stopped" }
+        return "\(shopper.limitMoney.short) a \(shopper.period), \(shopper.leftMoney.short) left"
     }
 
     var body: some View {
         ZStack {
             LightField()
+            ScrollViewReader { reader in
             ScrollView {
                 VStack(spacing: 22) {
                     ZStack {
-                        Text(item.blocked ? "Blocked payment" : "Receipt")
+                        Text(title)
                             .font(.system(size: 16, weight: .medium))
                         HStack {
                             Button { dismiss() } label: {
@@ -35,8 +41,8 @@ struct ReceiptView: View {
                             .glassEffect(.regular.interactive(), in: .circle)
                             .accessibilityLabel("Close")
                             Spacer()
-                            if !item.blocked, let proof {
-                                ShareLink(item: proof) {
+                            if !item.blocked, let link {
+                                ShareLink(item: link) {
                                     Image(systemName: "square.and.arrow.up")
                                         .font(.system(size: 16, weight: .medium))
                                         .frame(width: 44, height: 44)
@@ -49,12 +55,23 @@ struct ReceiptView: View {
                     .frame(height: 44)
 
                     pass
+
+                    if showingProof { proof.id("proof") }
                 }
                 .padding(.horizontal, 20)
                 .padding(.top, 20)
                 .padding(.bottom, 32)
+                .animation(.smooth(duration: 0.3), value: showingProof)
             }
             .scrollIndicators(.hidden)
+            .onChange(of: showingProof) { _, showing in
+                guard showing else { return }
+                Task {
+                    try? await Task.sleep(for: .milliseconds(150))
+                    withAnimation(.smooth(duration: 0.4)) { reader.scrollTo("proof", anchor: .bottom) }
+                }
+            }
+            }
         }
     }
 
@@ -69,10 +86,36 @@ struct ReceiptView: View {
                 .padding(.horizontal, 28)
 
             VStack(spacing: 0) {
-                row("For", item.item)
-                row(item.blocked ? "Tried by" : "Paid by", item.agent.name)
-                row(item.blocked ? "On behalf of" : "Allowed by", store.overview?.owner.name ?? "You")
-                row("Under the rule", ruleLine)
+                if item.added {
+                    row("From", "Your bank (demo transfer)")
+                    row("To", "Your account")
+                } else {
+                    row("For", item.item)
+                    if item.blocked {
+                        row("Tried by", item.shopper?.name ?? "A shopper")
+                        row("On behalf of", store.customer?.name ?? "You")
+                    } else if item.byYou {
+                        row("Paid by", "You")
+                        row("Asked by", item.shopper?.name ?? "A shopper")
+                    } else {
+                        row("Paid by", item.shopper?.name ?? "A shopper")
+                        row("Allowed by", store.customer?.name ?? "You")
+                    }
+                    if !item.blocked, let ruleLine { row("Rule now", ruleLine) }
+                }
+                if let note = item.note {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "text.quote")
+                            .foregroundStyle(Color.glow)
+                        Text(note)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Spacer(minLength: 0)
+                    }
+                    .font(.system(size: 14))
+                    .padding(12)
+                    .background(.white.opacity(0.08), in: .rect(cornerRadius: 14))
+                    .padding(.vertical, 8)
+                }
             }
             .padding(.horizontal, 24)
             .padding(.top, 14)
@@ -89,19 +132,34 @@ struct ReceiptView: View {
 
     private var top: some View {
         VStack(spacing: 0) {
-            Text(String(item.seller.name.prefix(1)))
-                .font(.system(size: 22, weight: .semibold))
-                .foregroundStyle(Color.ink)
-                .frame(width: 52, height: 52)
-                .background(.white.opacity(0.92), in: .circle)
-            Text(item.seller.name)
+            Group {
+                if item.added {
+                    Image(systemName: "arrow.down.to.line")
+                        .font(.system(size: 22, weight: .semibold))
+                } else {
+                    Text(String(item.storeName.prefix(1)))
+                        .font(.system(size: 22, weight: .semibold))
+                }
+            }
+            .foregroundStyle(Color.ink)
+            .frame(width: 52, height: 52)
+            .background(.white.opacity(0.92), in: .circle)
+
+            Text(item.added ? "Added to your account" : item.storeName)
                 .font(.system(size: 17, weight: .medium))
                 .padding(.top, 10)
-            Label(item.seller.verified ? "Trusted store" : "Not a trusted store",
-                  systemImage: item.seller.verified ? "checkmark.shield" : "exclamationmark.shield")
-                .font(.system(size: 13))
-                .foregroundStyle(item.seller.verified ? Color.trusted : Color.blocked)
-                .padding(.top, 2)
+            if let store = item.store {
+                Label(store.trusted ? "Trusted store" : "Not a trusted store",
+                      systemImage: store.trusted ? "checkmark.shield" : "exclamationmark.shield")
+                    .font(.system(size: 13))
+                    .foregroundStyle(store.trusted ? Color.trusted : Color.blocked)
+                    .padding(.top, 2)
+                if !store.trusted, let real = store.looksLike {
+                    Text("Looks like \(real), but isn't")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.soft)
+                }
+            }
             AmountText(money: item.money, size: 58, struck: item.blocked)
                 .foregroundStyle(item.blocked ? Color.blocked : .white)
                 .padding(.top, 8)
@@ -151,8 +209,8 @@ struct ReceiptView: View {
                     .font(.system(size: 13))
                     .foregroundStyle(Color.soft)
                     .fixedSize(horizontal: false, vertical: true)
-                if let proof {
-                    Link("See the proof", destination: proof)
+                if item.proof != nil || link != nil {
+                    Button(showingProof ? "Hide the proof" : "See the proof") { showingProof.toggle() }
                         .font(.system(size: 13, weight: .medium))
                         .foregroundStyle(Color.glow)
                         .frame(minHeight: 30)
@@ -174,6 +232,7 @@ struct ReceiptView: View {
                 Text(item.reason ?? "Blocked")
                     .font(.system(size: 15, weight: .medium))
                     .foregroundStyle(Color.blocked)
+                    .fixedSize(horizontal: false, vertical: true)
                 Text("Your account's rules stopped this before anything was sent. Your money didn't move.")
                     .font(.system(size: 13))
                     .foregroundStyle(Color.soft)
@@ -184,6 +243,55 @@ struct ReceiptView: View {
         .padding(.horizontal, 24)
         .padding(.top, 12)
         .padding(.bottom, 24)
+    }
+
+    /// What the account itself checked, and where anyone can look it up.
+    private var proof: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Text("Checked by your account")
+                .font(.system(size: 14))
+                .foregroundStyle(Color.soft)
+                .padding(.bottom, 8)
+            if let checks = item.proof?.checks, !checks.isEmpty {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(checks, id: \.self) { check in
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: "checkmark.circle.fill")
+                                .foregroundStyle(Color.trusted)
+                            Text(check)
+                                .font(.system(size: 14))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                }
+                .padding(.bottom, 10)
+            } else if item.added {
+                Text("A transfer into your account, recorded on the Stellar test network.")
+                    .font(.system(size: 14))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .padding(.bottom, 10)
+            }
+            Rectangle().fill(.white.opacity(0.14)).frame(height: 1)
+            if let ruleId = item.proof?.ruleId { ProofRow(label: "Rule", value: "#\(ruleId)") }
+            if let key = item.proof?.agentKey { ProofRow(label: "Shopper's key", value: shortened(key)) }
+            if let account = item.proof?.smartAccount ?? store.account?.address {
+                ProofRow(label: "Account", value: shortened(account))
+            }
+            if let hash = item.txHash { ProofRow(label: "Transaction", value: shortened(hash)) }
+            if let link {
+                Link(destination: link) {
+                    Label("View on Stellar", systemImage: "arrow.up.right")
+                        .font(.system(size: 14, weight: .medium))
+                        .foregroundStyle(Color.glow)
+                        .frame(minHeight: 44)
+                }
+            }
+        }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 16)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .glassPanel(24)
+        .transition(.move(edge: .bottom).combined(with: .opacity))
     }
 }
 
