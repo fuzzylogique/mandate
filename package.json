@@ -12,6 +12,7 @@
     "dev:receipts": "pnpm --filter @mandate/receipts dev",
     "dev:merchant": "pnpm --filter @mandate/merchant dev",
     "dev:facilitator": "pnpm --filter @mandate/facilitator dev",
+    "tunnel": "cloudflared tunnel --url http://localhost:4022",
     "setup:payments": "node scripts/setup-payments.ts",
     "setup:contracts": "node scripts/deploy-contracts.ts",
     "setup:stores": "node scripts/setup-stores.ts",
