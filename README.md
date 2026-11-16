@@ -4,6 +4,21 @@ An email/password payment workspace with one main account per user. Signup autom
 
 The dashboard shows your main account and USD balance at the top, followed by **Agents**, **Mandates** and **Activity**. There is no separate account-opening step. The Classic wallet stays private and is managed automatically.
 
+## Deployed on Stellar Testnet
+
+| Contract | ID |
+|---|---|
+| Agent registry | [`CAUNHENIZIUTRJ57GCZ2BY7OM6VIQLIF7GA5DBYAJHJ5WLSV5ETKOGHH`](https://stellar.expert/explorer/testnet/contract/CAUNHENIZIUTRJ57GCZ2BY7OM6VIQLIF7GA5DBYAJHJ5WLSV5ETKOGHH) |
+| Agent verifier | [`CAWQMKRQXVOU4IEK4LB4T5SZBGWKD7AN4WTUZJANEUTPJSHMG2JUCV7W`](https://stellar.expert/explorer/testnet/contract/CAWQMKRQXVOU4IEK4LB4T5SZBGWKD7AN4WTUZJANEUTPJSHMG2JUCV7W) |
+| Spending-limit policy | [`CAVIDSIO5AX65326A4KEZMAOSJXNRIRLNKKQTSGJU2F4DF43GKKNUOJT`](https://stellar.expert/explorer/testnet/contract/CAVIDSIO5AX65326A4KEZMAOSJXNRIRLNKKQTSGJU2F4DF43GKKNUOJT) |
+| Seller registry | [`CDOMOPTBJPOSFJMPYHI5G7HJC6QFRAPDWKFISGNENJGSKB2PZOA7J3BO`](https://stellar.expert/explorer/testnet/contract/CDOMOPTBJPOSFJMPYHI5G7HJC6QFRAPDWKFISGNENJGSKB2PZOA7J3BO) |
+| Verified-seller policy | [`CBR4M66YAZTBATCMGPOTYE2T5WAU6MKURKMOGF6VWSFCS757VPX6L2FZ`](https://stellar.expert/explorer/testnet/contract/CBR4M66YAZTBATCMGPOTYE2T5WAU6MKURKMOGF6VWSFCS757VPX6L2FZ) |
+| Owner signature verifier (Ed25519) | [`CBWYAZ7NASNMIL7DIQKD2R4UITMCXHAEVJQHYXHPSGYM6ECOLRDLVPMH`](https://stellar.expert/explorer/testnet/contract/CBWYAZ7NASNMIL7DIQKD2R4UITMCXHAEVJQHYXHPSGYM6ECOLRDLVPMH) |
+| Demo USD (Stellar Asset Contract) | [`CAF5YGTPPQFX3EYSEYTBI46CASCALCNPGQK3HYFQSPCBZVQKETQCMTJQ`](https://stellar.expert/explorer/testnet/contract/CAF5YGTPPQFX3EYSEYTBI46CASCALCNPGQK3HYFQSPCBZVQKETQCMTJQ) |
+
+Every user's smart account is deployed from the account WASM with hash
+`04ca584b40766568b33d981f4f95c1061d304c0e25d45b7217cba006d7ba40e0`.
+
 ## Run
 
 For this configured checkout:
