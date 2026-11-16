@@ -68,8 +68,12 @@ struct Mandate: Codable, Identifiable, Hashable {
     let spent: String
     let period: String?
     let createdAt: String
+    /// Set when the mandate is granted to an agent that holds its own key:
+    /// only that key can sign for it, and there is no secret mandate ID.
+    var agentId: String? = nil
 
     var id: Int { ruleId }
+    var signedByAgentKey: Bool { agentId != nil }
     var isActive: Bool { status == "active" && limit != nil }
 
     var limitMoney: Money? { limit.map { Money(base: $0, token: token) } }
@@ -96,6 +100,56 @@ struct Mandate: Codable, Identifiable, Hashable {
     var rule: String {
         guard let limitMoney else { return "Stopped" }
         return "Up to \(limitMoney.short) a \(period ?? "day"), at trusted stores only"
+    }
+}
+
+/// An agent registered to the account. One that holds its own key connects
+/// with a one-time code; only its key can sign for mandates granted to it.
+struct AccountAgent: Codable, Identifiable, Hashable {
+    struct Pairing: Codable, Hashable {
+        let code: String
+        let expiresAt: String
+        var expiry: Date { Dates.parse(expiresAt) }
+    }
+
+    let id: String
+    let accountId: String
+    let name: String
+    let createdAt: String
+    let verified: Bool
+    let verificationTxHash: String?
+    let explorerUrl: String?
+    /// "waiting", "connected" or "revoked". Absent for agents registered by identification only.
+    let status: String?
+    let publicKey: String?
+    let pairing: Pairing?
+
+    var isWaiting: Bool { status == "waiting" }
+    var isConnected: Bool { status == "connected" }
+    var isRemoved: Bool { status == "revoked" }
+    /// Holds its own key, or is waiting to: these can be removed from the app.
+    var holdsOwnKey: Bool { status != nil }
+    /// Waiting and removed agents can't be given a mandate.
+    var canHoldMandate: Bool { status == nil || status == "connected" }
+
+    /// "GABCDE…UVWXYZ"
+    var shortKey: String? {
+        guard let publicKey, publicKey.count > 14 else { return publicKey }
+        return "\(publicKey.prefix(6))…\(publicKey.suffix(6))"
+    }
+
+    var statusLabel: String {
+        switch status {
+        case "waiting": "Waiting to connect"
+        case "revoked": "Removed"
+        case "connected": verified ? "Connected · own key, verified on chain" : "Connected · not yet confirmed on chain"
+        default: verified ? "Verified on chain" : "Not verified on chain"
+        }
+    }
+
+    var initials: String {
+        let letters = name.split(separator: " ").prefix(2).compactMap(\.first)
+        return letters.isEmpty ? "?" : String(letters).uppercased()
     }
 }
 
