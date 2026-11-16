@@ -40,14 +40,15 @@ Smart contract, installs asset-specific payment policies, and registers the C ad
 as a verified recipient. The dashboard shows the Smart Account address and live
 USD balance. The Classic wallet remains private.
 
-**Add funds** in the main account summary offers two methods: **FIAT** adds demo USD without a bank or card charge; **Testnet** uses the existing automatic Stellar testnet funding flow. Both credit the same on-chain USD balance:
+**Add funds** in the main account summary offers two methods: **FIAT** opens Stripe hosted Checkout using sandbox/test cards; **Testnet** uses the automatic Stellar testnet funding flow. No real money is charged. Both credit the same on-chain USD balance:
 
-1. Choose FIAT or Testnet, enter a USD amount with up to two decimal places and click **Add funds**.
-2. The demo issuer sends that exact amount to the account's mapped Classic wallet, creating its USD trustline automatically.
-3. The service forwards the USD tokens through their Stellar Asset Contract into the Smart Account.
-4. After forwarding confirms, the dashboard refreshes its on-chain USD balance and shows the funding receipt.
+1. Choose FIAT or Testnet and enter a USD amount with up to two decimal places. FIAT accepts 0.50–999,999.99 USD; Testnet accepts up to 1,000,000 USD.
+2. For FIAT, click **Continue to Stripe** and complete the test card checkout. The API verifies that the Stripe session is paid, in test mode, and matches the stored account and amount. Signed webhooks complete funding even if you close the browser; returning to the dashboard also checks confirmation. For Testnet, click **Add funds**.
+3. The demo issuer sends that exact amount to the account's mapped Classic wallet, creating its USD trustline automatically.
+4. The service forwards the USD tokens through their Stellar Asset Contract into the Smart Account.
+5. After forwarding confirms, the dashboard refreshes its on-chain USD balance and shows the funding receipt.
 
-There is no fiat ledger, external deposit provider, onboarding page or bank/card charge.
+Stripe sandbox payments authorize demo funding; they do not transfer real dollars or mint redeemable assets. Checkout requests and confirmed funding are persisted so retries and duplicate webhooks reuse the same checkout and credit once. Cancelled, unpaid, expired or mismatched sessions do not credit the account.
 The local demo issuer's private key is encrypted in the custody vault and reused
 across restarts. Its public issuer address and token contract are exposed in
 `/api/network`. These tokens represent fake demo dollars, not USDC or redeemable money.
@@ -81,6 +82,21 @@ The service attests `(Smart Account C address, agent ID)` in an administrator-co
 Payments require both the secret `mandateId` and the registered `agentId`. The mandate verifier checks the on-chain registry during Smart Account authorization. The mandate signature binds the agent ID to the account, rule and payment digest, and emits an on-chain agent authorization event. Foreign, missing, unknown or revoked identities cannot authorize a mandate payment. The API records `agentId` in activity and receipts. Existing mandate rules are upgraded before payment by replacing the old signer with the agent-aware verifier; their limits and spending history remain intact.
 
 Run `pnpm setup:contracts` for an existing checkout to deploy the agent registry and verifier and save their IDs. Existing agents are never inferred from mandate-holder names.
+
+## Stripe sandbox setup
+
+1. In your [Stripe sandbox](https://docs.stripe.com/testing), get a test secret key and set `STRIPE_SECRET_KEY=sk_test_...` in `.env`. Live keys are rejected. Hosted Checkout does not require a publishable key.
+2. Run `stripe login`, then forward events using the Stripe CLI:
+
+   ```sh
+   stripe listen --events checkout.session.completed,checkout.session.async_payment_succeeded --forward-to http://localhost:4022/api/stripe/webhook
+   ```
+
+3. Copy the listener's `whsec_...` secret into `STRIPE_WEBHOOK_SECRET` in `.env` and restart `pnpm dev`. Keep the listener running. `WEB_ORIGIN` must match the browser origin (default `http://localhost:4020`); Checkout returns there.
+4. Choose **FIAT**, enter an amount, and continue to Stripe. Use `4242 4242 4242 4242`, any future expiry and any three-digit CVC. Use `4000 0000 0000 0002` to test a decline. Test cards and authentication scenarios are listed in [Stripe's testing guide](https://docs.stripe.com/testing).
+5. After successful checkout, the Activity page confirms funding and refreshes the account balance. If Stellar forwarding is temporarily unavailable, use **Retry confirmation** or let Stripe retry the webhook. Keep the same funding request ID when retrying checkout creation.
+
+Stripe configuration is required for FIAT. Testnet funding works without Stripe credentials. For a hosted deployment, register the HTTPS `/api/stripe/webhook` endpoint in the same Stripe sandbox and use its signing secret instead of the CLI listener secret.
 
 ## Mandates and third-party payments
 
@@ -170,6 +186,8 @@ this same registry verification.
 | `PAYMENTS_REGISTRY_ADMIN_SECRET` | Testnet registry administrator key |
 | `STELLAR_SOURCE` | Stellar CLI identity used by `setup:contracts`; defaults to `mandate-deployer` |
 | `WEB_ORIGIN` | Allowed browser origin; defaults to `http://localhost:4020` |
+| `STRIPE_SECRET_KEY` | Stripe sandbox/test secret key (`sk_test_...`); live keys are rejected |
+| `STRIPE_WEBHOOK_SECRET` | Stripe webhook signing secret (`whsec_...`) for `/api/stripe/webhook` |
 | `RECEIPTS_PORT` | Payments API port; defaults to `4022` |
 | `NODE_ENV` | Set to `production` for Secure session cookies; requires HTTPS |
 
@@ -193,7 +211,9 @@ workspace schema and does not migrate other database layouts.
 | `GET /api/workspace` | Main account, agents, mandates and activity |
 | `POST /api/agents` | Register an agent on chain with a name and request ID |
 | `POST /api/accounts/open` | Legacy compatibility: returns the existing main account; never opens an additional account |
-| `POST /api/accounts/:id/funding` | Funding with `method: "fiat"` or `"testnet"`, amount and request ID; omitted method defaults to FIAT; returns HTTP 201 after confirmation |
+| `POST /api/accounts/:id/funding` | Funding with amount and request ID; `method: "fiat"` (default) returns HTTP 201 with `{ status: "checkout", provider: "stripe", mode: "test", sessionId, url }`; `"testnet"` returns HTTP 201 with a confirmed funding receipt |
+| `GET /api/funding/stripe/:sessionId` | Owner-authenticated Stripe confirmation; returns `paid` with a funding receipt, `pending`, or `expired` |
+| `POST /api/stripe/webhook` | Raw-body Stripe webhook with a verified `Stripe-Signature`; completes paid sandbox funding idempotently |
 | `POST /api/mandates` | Create a mandate on the main account; `accountId` is optional for older clients |
 | `POST /api/mandates/:reference/reveal` | Owner-only retrieval of the secret mandate ID for Show mandate |
 | `DELETE /api/mandates/:reference` | Revoke a mandate using its non-secret record reference |
@@ -250,7 +270,7 @@ Earlier XLM-only verification receipts are in
 [stellar-account-verification.json](docs/stellar-account-verification.json).
 Verification of payments using the previous secret-only payment flow is in
 [secret-mandate-verification.json](docs/secret-mandate-verification.json).
-Funding directly issues demo USD; all new payment settlement uses Stellar testnet only.
+FIAT funding requires a confirmed Stripe sandbox payment; Testnet funding issues demo USD directly. All payment settlement uses Stellar testnet only.
 
 Deployed agent-registry and mandate-verifier checks, including a successful identified agent payment and refusal of unknown or foreign account identities, are recorded in [agent-identity-verification.json](docs/agent-identity-verification.json).
 
