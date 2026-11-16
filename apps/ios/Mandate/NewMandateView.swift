@@ -6,8 +6,8 @@ struct NewMandateView: View {
     @Environment(AppStore.self) private var store
     @Environment(\.dismiss) private var dismiss
 
-    enum Field: Hashable { case name, amount, period, stores }
-    enum Stage: Equatable { case editing, confirming, saving }
+    enum Field: Hashable { case name, amount, period, stores, agent }
+    enum Stage: Equatable { case editing, confirming, saving, done }
 
     @State private var requestId = UUID().uuidString
     @State private var expiresAt = ISO8601DateFormatter().string(from: Date().addingTimeInterval(30 * 86400))
@@ -16,6 +16,9 @@ struct NewMandateView: View {
     @State private var amount = "50"
     @State private var typingAmount = false
     @State private var period = "week"
+    /// nil lets any agent registered to the account use it.
+    @State private var agentId: String?
+    @State private var created: Mandate?
     @State private var stage: Stage = .editing
     @State private var slid = false
     @State private var problem: String?
@@ -26,12 +29,31 @@ struct NewMandateView: View {
 
     private var token: TokenInfo { store.token ?? TokenInfo(id: "", symbol: "USDC") }
 
+    private var chosenAgent: AccountAgent? { store.eligibleAgents.first { $0.id == agentId } }
+
+    private var agentLabel: String {
+        guard let chosenAgent else { return "any agent" }
+        return chosenAgent.name.count > 18 ? "\(chosenAgent.name.prefix(17))…" : chosenAgent.name
+    }
+
+    private func ownKeyLine(_ agent: AccountAgent) -> String {
+        "Only \(agent.name)'s own key will be able to sign for this mandate. There is no secret ID, and the seller list is enforced on chain."
+    }
+
     private var amountLabel: String {
         guard let value = Decimal(string: amount), value > 0 else { return "an amount" }
         return Money(value: value, token: token).short
     }
 
     var body: some View {
+        if stage == .done, let created {
+            CreatedForAgentView(mandate: created, agentName: store.agent(created.agentId)?.name ?? chosenAgent?.name ?? "the agent") { dismiss() }
+        } else {
+            editing
+        }
+    }
+
+    private var editing: some View {
         ZStack {
             LightField()
                 .onTapGesture { focus = nil }
@@ -62,6 +84,19 @@ struct NewMandateView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                     .padding(.top, 24)
+
+                    if let chosenAgent, chosenAgent.isConnected {
+                        HStack(alignment: .top, spacing: 12) {
+                            Image(systemName: "key")
+                                .font(.system(size: 20))
+                                .foregroundStyle(Color.glow)
+                            Text(ownKeyLine(chosenAgent))
+                                .font(.system(size: 14))
+                                .foregroundStyle(Color.soft)
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                        .padding(.top, 14)
+                    }
                 }
                 .padding(.horizontal, 20)
                 .padding(.bottom, 24)
@@ -74,6 +109,7 @@ struct NewMandateView: View {
         .onChange(of: name) { _, _ in requestId = UUID().uuidString }
         .onChange(of: amount) { _, _ in requestId = UUID().uuidString }
         .onChange(of: period) { _, _ in requestId = UUID().uuidString }
+        .onChange(of: agentId) { _, _ in requestId = UUID().uuidString }
     }
 
     private var topBar: some View {
@@ -111,6 +147,9 @@ struct NewMandateView: View {
             word("at")
             blank(.stores, "trusted stores")
             word("only.")
+            word("Used")
+            word("by")
+            blank(.agent, agentLabel, empty: chosenAgent == nil)
         }
         .padding(.horizontal, 22)
         .padding(.vertical, 24)
@@ -202,7 +241,69 @@ struct NewMandateView: View {
                 .padding(18)
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .glassPanel(24)
+        case .agent:
+            agentPicker
         }
+    }
+
+    private var agentPicker: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            VStack(spacing: 0) {
+                agentRow(nil, "Any registered agent", detail: "Uses its identification and a secret mandate ID")
+                ForEach(store.eligibleAgents) { agent in
+                    Rectangle().fill(.white.opacity(0.14)).frame(height: 1)
+                    agentRow(agent.id, agent.isConnected ? "\(agent.name) · own key" : agent.name,
+                             detail: agent.isConnected ? agent.shortKey.map { "Signs with \($0)" } : "Uses its identification and a secret mandate ID")
+                }
+            }
+            .padding(.horizontal, 18)
+            .padding(.vertical, 2)
+            .glassPanel(24)
+
+            Text(chosenAgent?.isConnected == true
+                 ? "The agent can only pay verified sellers, within this limit, until the mandate expires."
+                 : "Without an agent that holds its own key, any agent registered to your account can use the mandate with its identification value and the secret mandate ID.")
+                .font(.system(size: 13))
+                .foregroundStyle(Color.soft)
+                .fixedSize(horizontal: false, vertical: true)
+            if store.agents.contains(where: \.isWaiting) {
+                Text("Agents still waiting to connect can't be chosen yet.")
+                    .font(.system(size: 13))
+                    .foregroundStyle(Color.soft)
+            }
+        }
+    }
+
+    private func agentRow(_ id: String?, _ title: String, detail: String?) -> some View {
+        let selected = agentId == id
+        return Button {
+            agentId = id
+            problem = nil
+        } label: {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(.system(size: 16, weight: .medium))
+                        .lineLimit(1)
+                    if let detail {
+                        Text(detail)
+                            .font(.system(size: 12))
+                            .foregroundStyle(Color.soft)
+                            .lineLimit(1)
+                    }
+                }
+                Spacer(minLength: 8)
+                if selected {
+                    Image(systemName: "checkmark")
+                        .font(.system(size: 16, weight: .semibold))
+                        .foregroundStyle(Color.glow)
+                }
+            }
+            .frame(minHeight: 60)
+            .contentShape(.rect)
+        }
+        .buttonStyle(.plain)
+        .accessibilityAddTraits(selected ? .isSelected : [])
     }
 
     private func chips(_ options: [String], selected: String, pick: @escaping (String) -> Void) -> some View {
@@ -275,6 +376,10 @@ struct NewMandateView: View {
         guard amount.range(of: #"^\d+(\.\d{1,7})?$"#, options: .regularExpression) != nil,
               let value = Decimal(string: amount), value > 0
         else { return refuse("Enter a limit greater than zero", .amount) }
+        if agentId != nil, chosenAgent == nil {
+            return refuse("That agent can't be given a mandate any more. Choose another.", .agent)
+        }
+        let ownKey = chosenAgent?.isConnected == true
 
         focus = nil
         problem = nil
@@ -285,10 +390,71 @@ struct NewMandateView: View {
 
         stage = .saving
         do {
-            try await store.create(name: trimmed, limit: amount, period: period, expiresAt: expiresAt, requestId: requestId)
-            dismiss()
+            let mandate = try await store.create(name: trimmed, limit: amount, period: period, agentId: agentId, expiresAt: expiresAt, requestId: requestId)
+            if ownKey || mandate.signedByAgentKey {
+                created = mandate
+                stage = .done
+            } else {
+                dismiss()
+            }
         } catch {
             refuse(error.localizedDescription, nil)
+        }
+    }
+}
+
+/// After giving a mandate to an agent that holds its own key: there is nothing secret to pass on.
+private struct CreatedForAgentView: View {
+    let mandate: Mandate
+    let agentName: String
+    let done: () -> Void
+
+    var body: some View {
+        ZStack {
+            LightField()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    Image(systemName: "checkmark.shield.fill")
+                        .font(.system(size: 44))
+                        .foregroundStyle(Color.trusted)
+                        .padding(.top, 60)
+                    Text("\(mandate.name) is ready")
+                        .font(.system(size: 30, weight: .semibold))
+                        .tracking(-0.8)
+                    Text(mandate.rule)
+                        .font(.system(size: 15))
+                        .foregroundStyle(Color.soft)
+                    VStack(alignment: .leading, spacing: 14) {
+                        point("key", "Signed only by \(agentName)'s own key. No secret ID.")
+                        point("person.badge.shield.checkmark", "There's no mandate ID to share. \(agentName) can already use it.")
+                        point("checkmark.shield", "Its seller list is enforced on chain, and it can't raise the limit.")
+                    }
+                    .padding(18)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .glassPanel()
+                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 24)
+            }
+            .scrollIndicators(.hidden)
+        }
+        .safeAreaInset(edge: .bottom) {
+            Button("Done", action: done)
+                .buttonStyle(LensButtonStyle())
+                .padding(.horizontal, 20)
+                .padding(.bottom, 10)
+        }
+    }
+
+    private func point(_ icon: String, _ text: String) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: icon)
+                .font(.system(size: 17))
+                .foregroundStyle(Color.glow)
+                .frame(width: 24)
+            Text(text)
+                .font(.system(size: 14))
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

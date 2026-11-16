@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { Keypair, StrKey } from "@stellar/stellar-sdk";
 import type { PaymentNetwork, SpendingPeriod } from "@mandate/shared";
+import { agentSigningPayload } from "@mandate/shared";
 import { StellarPaymentService } from "./stellar-service.ts";
 import { StellarGateway, stellarConfig, type ChainGateway, type ChainWallet } from "./stellar.ts";
 import { ServiceError, WorkspaceStore } from "./store.ts";
@@ -37,21 +38,54 @@ class TestStripe implements FiatGateway {
 
 /** Fake network for service tests. It owns balances; the service cannot create money. */
 class TestChain implements ChainGateway {
-  network: PaymentNetwork = { id: "stellar:testnet", name: "Test chain", rpcUrl: "https://rpc.example", horizonUrl: "https://horizon.example", explorerUrl: "https://explorer.example", currency: "XLM", tokenContract: StrKey.encodeContract(randomBytes(32)), smartAccounts: true, verifiedSmartAccounts: true, mandates: true, agentVerification: true, faucet: true };
+  network: PaymentNetwork = { id: "stellar:testnet", name: "Test chain", rpcUrl: "https://rpc.example", horizonUrl: "https://horizon.example", explorerUrl: "https://explorer.example", currency: "XLM", tokenContract: StrKey.encodeContract(randomBytes(32)), smartAccounts: true, verifiedSmartAccounts: true, mandates: true, agentVerification: true, agentVerifier: StrKey.encodeContract(randomBytes(32)), faucet: true };
   verified = new Set<string>();
-  agents = new Map<string, string>();
-  async registerAgent(_id: string, account: ChainWallet, agentId: string, name: string) {
+  agents = new Map<string, { name: string; publicKey?: string }>();
+  async registerAgent(_id: string, account: ChainWallet, agentId: string, name: string, publicKey?: string) {
     if (this.fail) throw new Error("Registry unavailable");
-    this.agents.set(`${account.address}:${agentId}`, name); return this.receipt();
+    const existing = this.agents.get(`${account.address}:${agentId}`);
+    // The registry refuses to rebind an agent that already has a key.
+    if (existing?.publicKey && existing.publicKey !== publicKey) throw new Error("Registry rejected key change");
+    this.agents.set(`${account.address}:${agentId}`, { name, ...(publicKey ? { publicKey } : {}) }); return this.receipt();
   }
+  async revokeAgent(_id: string, account: ChainWallet, agentId: string) { if (this.fail) throw new Error("Registry unavailable"); this.agents.delete(`${account.address}:${agentId}`); return this.receipt(); }
   async isVerifiedAgent(account: string, agentId: string) { return this.agents.has(`${account}:${agentId}`); }
+  usdToken() { return "CUSDTOKEN"; }
+  prepared = new Map<string, { treasury: string; source: ChainWallet; destination: string; amount: bigint; ruleId: number; currency: string; entry: string }>();
+  /** Fake auth entry: the agent signs these exact bytes with its own key. */
+  async preparePayment(id: string, treasury: ChainWallet, source: ChainWallet, destination: string, units: bigint, ruleId: number, currency = "USD") {
+    if (this.transactions.has(id)) throw new ServiceError(409, "This payment was already submitted. Check its status with the same request ID.");
+    const entry = this.prepared.get(id)?.entry ?? Buffer.from(JSON.stringify({ id, source: source.address, destination, amount: units.toString(), ruleId, nonce: randomBytes(8).toString("hex") })).toString("base64");
+    this.prepared.set(id, { treasury: treasury.id, source, destination, amount: units, ruleId, currency, entry });
+    return { authEntry: entry, expirationLedger: 1000 };
+  }
+  async submitPayment(id: string, treasury: ChainWallet, signedAuthEntry: string) {
+    if (this.transactions.has(id)) return this.transactions.get(id)!;
+    const saved = this.prepared.get(id);
+    if (!saved || saved.treasury !== treasury.id) throw new ServiceError(404, "Prepare this payment first");
+    const signed = JSON.parse(Buffer.from(signedAuthEntry, "base64").toString()) as { entry: string; agentId: string; publicKey: string; signature: string };
+    if (signed.entry !== saved.entry) throw new ServiceError(400, "The signed authorization does not match the prepared payment");
+    const rule = this.rules.get(saved.ruleId)!;
+    const bound = this.agents.get(`${saved.source.address}:${signed.agentId}`);
+    // What the verifier and policies check on chain.
+    const valid = Keypair.fromPublicKey(signed.publicKey).verify(Buffer.from(`${signed.agentId}:${signed.entry}`), Buffer.from(signed.signature, "base64"));
+    if (!valid || !bound || bound.publicKey !== signed.publicKey || rule.agentKey !== signed.publicKey) throw new ServiceError(403, "The account's rules rejected this payment");
+    if (!await this.isVerifiedSmartAccount(saved.destination) || (rule.sellers && !rule.sellers.includes(saved.destination)) || rule.revoked || Date.parse(rule.expiresAt) <= Date.now() || await this.spent(saved.source, saved.ruleId) + saved.amount > rule.limit || await this.balance(saved.source, saved.currency) < saved.amount) throw new ServiceError(403, "The account's rules rejected this payment");
+    rule.history.push({ amount: saved.amount, time: Date.now() }); rule.spent += saved.amount;
+    this.assetBalances(saved.currency).set(saved.source.address, await this.balance(saved.source, saved.currency) - saved.amount);
+    this.assetBalances(saved.currency).set(saved.destination, (this.assetBalances(saved.currency).get(saved.destination) ?? 0n) + saved.amount);
+    this.transfers.push({ source: saved.source.address, destination: saved.destination, amount: saved.amount, ruleId: saved.ruleId, currency: saved.currency });
+    const receipt = this.receipt(); this.transactions.set(id, receipt); this.chainTransfers.set(receipt.txHash, { token: this.usdToken(), from: saved.source.address, to: saved.destination, amount: saved.amount }); return receipt;
+  }
+  chainTransfers = new Map<string, { token: string; from: string; to: string; amount: bigint }>();
+  async readTransfer(txHash: string) { const found = this.chainTransfers.get(txHash); if (!found) throw new ServiceError(404, "That transaction is not confirmed on Stellar testnet"); return found; }
   wallets = new Map<string, ChainWallet>();
   balances = new Map<string, bigint>();
   usdBalances = new Map<string, bigint>();
   private assetBalances(currency = "XLM") { return currency === "USD" ? this.usdBalances : this.balances; }
   values = new Map<string, string>();
   commands = new Map<string, { fingerprint: string; result: unknown }>();
-  rules = new Map<number, { accountId: string; currency: string; limit: bigint; spent: bigint; revoked: boolean; expiresAt: string; periodMs: number; history: { amount: bigint; time: number }[] }>();
+  rules = new Map<number, { agentKey?: string; sellers?: string[]; accountId: string; currency: string; limit: bigint; spent: bigint; revoked: boolean; expiresAt: string; periodMs: number; history: { amount: bigint; time: number }[] }>();
   transfers: { source: string; destination: string; amount: bigint; ruleId?: number; currency: string }[] = [];
   owners = new Map<string, string>();
   deposits: { destination: string; amount: bigint; currency: string }[] = [];
@@ -106,6 +140,7 @@ class TestChain implements ChainGateway {
       assert.ok(mandate.agentId && await this.isVerifiedAgent(source.address, mandate.agentId), "Contract rejected unregistered agent");
       assert.ok(await this.isVerifiedSmartAccount(destination), "Contract rejected unverified smart recipient");
       const rule = this.rules.get(mandate.ruleId)!;
+      assert.ok(!rule.agentKey, "Only the agent's own key can sign this rule");
       assert.equal(rule.accountId, source.id); assert.equal(rule.currency, currency);
       assert.ok(!rule.revoked && Date.parse(rule.expiresAt) > Date.now() && await this.spent(source, mandate.ruleId) + units <= rule.limit, "Contract rejected mandate");
       rule.history.push({ amount: units, time: Date.now() }); rule.spent += units;
@@ -115,10 +150,10 @@ class TestChain implements ChainGateway {
     this.transfers.push({ source: source.address, destination, amount: units, ruleId: mandate?.ruleId, currency });
     const receipt = this.receipt(); this.transactions.set(_id, receipt); return receipt;
   }
-  async addMandate(_id: string, _treasury: ChainWallet, _account: ChainWallet, input: { limit: bigint; name: string; period: SpendingPeriod; expiresAt: string; currency?: string }) {
+  async addMandate(_id: string, _treasury: ChainWallet, _account: ChainWallet, input: { limit: bigint; name: string; period: SpendingPeriod; expiresAt: string; currency?: string; agentKey?: string; sellers?: string[] }) {
     assert.equal(_treasury.id, this.owners.get(_account.id));
     if (this.fail) throw new Error("Network unavailable");
-    const ruleId = this.nextRule++; this.rules.set(ruleId, { accountId: _account.id, currency: input.currency ?? "XLM", limit: input.limit, spent: 0n, revoked: false, expiresAt: input.expiresAt, periodMs: { day: 86400_000, week: 7 * 86400_000, month: 30 * 86400_000 }[input.period], history: [] }); return { ...this.receipt(), ruleId };
+    const ruleId = this.nextRule++; this.rules.set(ruleId, { ...(input.agentKey ? { agentKey: input.agentKey } : {}), ...(input.sellers ? { sellers: input.sellers } : {}), accountId: _account.id, currency: input.currency ?? "XLM", limit: input.limit, spent: 0n, revoked: false, expiresAt: input.expiresAt, periodMs: { day: 86400_000, week: 7 * 86400_000, month: 30 * 86400_000 }[input.period], history: [] }); return { ...this.receipt(), ruleId };
   }
   async revokeMandate(_id: string, _treasury: ChainWallet, _account: ChainWallet, ruleId: number) { if (this.fail) throw new Error("Network unavailable"); assert.equal(_treasury.id, this.owners.get(_account.id)); this.rules.get(ruleId)!.revoked = true; return this.receipt(); }
   async spent(_account: ChainWallet, ruleId: number) { const rule = this.rules.get(ruleId)!; return rule.history.filter(entry => entry.time > Date.now() - rule.periodMs).reduce((sum, entry) => sum + entry.amount, 0n); }
@@ -1418,4 +1453,212 @@ test("payments require a chain-registered account agent and allow every agent on
     await assert.rejects(service.pay(owner, { accountId: account.id, mandateReference: grant.mandate.reference, destination: seller.address, amount: "0.5", reference: "Bypass", requestId: "bypass" }), { status: 401 });
     assert.equal((await service.workspace(owner)).mandates.find(m => m.reference === grant.mandate.reference)!.spent, "1");
   } finally { service.close(); }
+});
+
+// ---------- agents that hold their own key ----------
+
+const sha256 = (value: string) => createHash("sha256").update(value).digest("hex");
+function signedHeaders(key: Keypair, method: string, path: string, body = "") {
+  const time = String(Date.now());
+  return { key: key.publicKey(), time, signature: key.sign(Buffer.from(agentSigningPayload(method, path, time, sha256(body)))).toString("base64") };
+}
+/** What the agent's MCP server does with a prepared payment, in the fake chain's format. */
+function signEntry(key: Keypair, agentId: string, entry: string) {
+  return Buffer.from(JSON.stringify({ entry, agentId, publicKey: key.publicKey(), signature: key.sign(Buffer.from(`${agentId}:${entry}`)).toString("base64") })).toString("base64");
+}
+async function connectedAgent(service: StellarPaymentService, owner: ReturnType<StellarPaymentService["authenticate"]>, name = "Shopping agent") {
+  const waiting = await service.createAgent(owner, { name, requestId: name, connect: true });
+  const key = Keypair.random();
+  const connection = await service.connectAgent({ code: waiting.pairing!.code }, key.publicKey());
+  const agent = service.agent(signedHeaders(key, "GET", "/api/agent/me"), "GET", "/api/agent/me", "");
+  return { key, agent, connection, waiting };
+}
+const agentMandate = (agentId: string, extra: Record<string, unknown> = {}) => ({ name: "Groceries", agentId, limit: "5", period: "day", expiresAt: new Date(Date.now() + 86400_000).toISOString(), requestId: `groceries-${agentId}`, ...extra });
+
+test("an agent connects with a one-time code, and only its own key is registered on chain", async () => {
+  const { service, owner, chain } = await fixture();
+  try {
+    const waiting = await service.createAgent(owner, { name: "Shopping agent", requestId: "shop", connect: true });
+    assert.equal(waiting.status, "waiting");
+    assert.equal(waiting.verified, false);
+    assert.match(waiting.pairing!.code, /^[2-9A-HJ-NP-Z]{4}-[2-9A-HJ-NP-Z]{4}$/);
+    const account = (await service.workspace(owner)).accounts[0]!;
+    assert.equal(await chain.isVerifiedAgent(account.address!, waiting.id), false, "nothing is registered before it connects");
+    const listed = (await service.workspace(owner)).agents.find(agent => agent.id === waiting.id)!;
+    assert.equal(listed.pairing!.code, waiting.pairing!.code);
+    assert.equal(JSON.stringify(await service.workspace(owner)).includes("pairingHash"), false);
+
+    await assert.rejects(service.connectAgent({ code: "AAAA-AAAA" }, Keypair.random().publicKey()), { status: 404 });
+    const key = Keypair.random();
+    const connection = await service.connectAgent({ code: waiting.pairing!.code.toLowerCase().replace("-", " ") }, key.publicKey());
+    assert.equal(connection.agentId, waiting.id);
+    assert.equal(connection.smartAccount, account.address);
+    assert.equal(chain.agents.get(`${account.address}:${waiting.id}`)!.publicKey, key.publicKey());
+    // The code works once.
+    await assert.rejects(service.connectAgent({ code: waiting.pairing!.code }, Keypair.random().publicKey()), { status: 404 });
+    const after = (await service.workspace(owner)).agents.find(agent => agent.id === waiting.id)!;
+    assert.equal(after.status, "connected");
+    assert.equal(after.verified, true);
+    assert.equal(after.publicKey, key.publicKey());
+    assert.equal(after.pairing, undefined);
+  } finally { service.close(); }
+});
+
+test("an expired code cannot connect, and a new code replaces it", async () => {
+  const { service, owner } = await fixture();
+  try {
+    const waiting = await service.createAgent(owner, { name: "Late agent", requestId: "late", connect: true });
+    (service as unknown as { core: WorkspaceStore }).core.update(state => { state.agents!.find(agent => agent.id === waiting.id)!.pairingExpiresAt = new Date(Date.now() - 1000).toISOString(); });
+    await assert.rejects(service.connectAgent({ code: waiting.pairing!.code }, Keypair.random().publicKey()), { status: 410 });
+    const renewed = await service.newPairingCode(owner, waiting.id);
+    assert.notEqual(renewed.pairing!.code, waiting.pairing!.code);
+    await assert.rejects(service.connectAgent({ code: waiting.pairing!.code }, Keypair.random().publicKey()), { status: 404 });
+    assert.equal((await service.connectAgent({ code: renewed.pairing!.code }, Keypair.random().publicKey())).agentId, waiting.id);
+    await assert.rejects(service.newPairingCode(owner, waiting.id), { status: 409 });
+  } finally { service.close(); }
+});
+
+test("requests must be signed by the connected agent's key", async () => {
+  const { service, owner } = await fixture();
+  try {
+    const { key } = await connectedAgent(service, owner);
+    const body = JSON.stringify({ mandate: "x" });
+    const headers = signedHeaders(key, "POST", "/api/agent/payments/prepare", body);
+    assert.equal(service.agent(headers, "POST", "/api/agent/payments/prepare", body).publicKey, key.publicKey());
+    // Changed body, path or method, an unknown key, or an old signature.
+    assert.throws(() => service.agent(headers, "POST", "/api/agent/payments/prepare", JSON.stringify({ mandate: "y" })), { status: 401 });
+    assert.throws(() => service.agent(headers, "POST", "/api/agent/x402", body), { status: 401 });
+    assert.throws(() => service.agent(signedHeaders(Keypair.random(), "GET", "/api/agent/me"), "GET", "/api/agent/me", ""), { status: 401 });
+    assert.throws(() => service.agent({ ...headers, key: Keypair.random().publicKey() }, "POST", "/api/agent/payments/prepare", body), { status: 401 });
+    assert.throws(() => service.agent({ ...signedHeaders(key, "GET", "/api/agent/me"), time: String(Date.now() - 10 * 60_000) }, "GET", "/api/agent/me", ""), { status: 401 });
+  } finally { service.close(); }
+});
+
+test("a connected agent's mandate is signed only by its key: no secret ID, and the service cannot pay with it", async () => {
+  const { service, owner, chain } = await fixture();
+  try {
+    const { agent } = await connectedAgent(service, owner);
+    const created = await service.grantMandate(owner, agentMandate(agent.id));
+    assert.equal(created.mandateId, undefined);
+    assert.equal(created.mandate.agentId, agent.id);
+    assert.equal(chain.rules.get(created.mandate.ruleId!)!.agentKey, agent.publicKey);
+    assert.throws(() => service.revealMandate(owner, created.mandate.reference), { status: 409 });
+    await assert.rejects(service.createMandate(owner, agentMandate(agent.id, { requestId: "again" })), { status: 409 });
+    const seller = await sellerAccount(service);
+    const account = (await service.workspace(owner)).accounts[0]!;
+    await service.fund(owner, account.id, { amount: "10", requestId: "fund" });
+    await assert.rejects(service.pay(owner, { accountId: account.id, mandateReference: created.mandate.reference, agentId: agent.id, amount: "1", destination: seller.address, reference: "Owner try", requestId: "owner-try" }), { status: 403 });
+    assert.equal(chain.transfers.filter(transfer => transfer.ruleId !== undefined).length, 0);
+  } finally { service.close(); }
+});
+
+test("an agent pays a verified seller with its own signature; Mandate submits and records it", async () => {
+  const { service, owner, chain } = await fixture();
+  try {
+    const { agent, key } = await connectedAgent(service, owner);
+    const { mandate } = await service.grantMandate(owner, agentMandate(agent.id));
+    const seller = await sellerAccount(service);
+    const account = (await service.workspace(owner)).accounts[0]!;
+    await service.fund(owner, account.id, { amount: "10", requestId: "fund" });
+    assert.deepEqual((await service.agentMandates(agent)).map(m => [m.reference, m.remaining]), [[mandate.reference, "5"]]);
+    assert.equal((await service.checkSeller(agent, seller.address!)).verified, true);
+
+    const input = { mandate: mandate.reference, seller: seller.address, amount: "2", reference: "Basil", requestId: "basil" };
+    const prepared = await service.prepareAgentPayment(agent, input);
+    assert.equal(prepared.summary.amount, "2");
+    assert.equal(prepared.smartAccount, account.address);
+    // A different key cannot sign as this agent, even with the right entry.
+    await assert.rejects(service.submitAgentPayment(agent, { paymentId: prepared.paymentId, authEntry: signEntry(Keypair.random(), agent.id, prepared.authEntry) }), { status: 403 });
+    const outcome = await service.submitAgentPayment(agent, { paymentId: prepared.paymentId, authEntry: signEntry(key, agent.id, prepared.authEntry) });
+    assert.equal(outcome.status, "paid");
+    assert.equal(outcome.status === "paid" && outcome.payment.agentId, agent.id);
+    // Retrying the same request does not pay twice.
+    await service.submitAgentPayment(agent, { paymentId: prepared.paymentId, authEntry: signEntry(key, agent.id, prepared.authEntry) });
+    assert.equal(chain.transfers.filter(transfer => transfer.ruleId === mandate.ruleId).length, 1);
+    assert.equal((await service.agentMandates(agent))[0]!.remaining, "3");
+    const activity = (await service.workspace(owner)).activity.find(entry => entry.reference === "Basil")!;
+    assert.equal(activity.agentId, agent.id);
+    assert.equal(activity.mandateReference, mandate.reference);
+    await assert.rejects(service.prepareAgentPayment(agent, { ...input, amount: "3" }), { status: 409 });
+  } finally { service.close(); }
+});
+
+test("agents cannot overspend, pay unverified or unlisted sellers, or pay after their owner removes them", async () => {
+  const { service, owner, chain } = await fixture();
+  try {
+    const { agent, key } = await connectedAgent(service, owner);
+    const allowed = await sellerAccount(service);
+    const other = await sellerAccount(service);
+    const { mandate } = await service.grantMandate(owner, agentMandate(agent.id, { sellerIds: [allowed.sellerId] }));
+    assert.deepEqual(chain.rules.get(mandate.ruleId!)!.sellers, [allowed.address], "the seller list is enforced on chain");
+    await assert.rejects(service.grantMandate(owner, agentMandate(agent.id, { sellerIds: [999_999], requestId: "unknown-seller" })), { status: 400 });
+    const account = (await service.workspace(owner)).accounts[0]!;
+    await service.fund(owner, account.id, { amount: "10", requestId: "fund" });
+    const base = { mandate: mandate.reference, seller: allowed.address, amount: "1", reference: "Item" };
+    await assert.rejects(service.prepareAgentPayment(agent, { ...base, amount: "6", requestId: "too-much" }), { status: 403, message: /spending limit/ });
+    await assert.rejects(service.prepareAgentPayment(agent, { ...base, seller: other.address, requestId: "unlisted" }), { status: 403, message: /allowed seller/ });
+    await assert.rejects(service.prepareAgentPayment(agent, { ...base, seller: StrKey.encodeContract(randomBytes(32)), requestId: "lookalike" }), { status: 403, message: /verified/ });
+    await assert.rejects(service.prepareAgentPayment(agent, { ...base, seller: Keypair.random().publicKey(), requestId: "classic" }), { status: 403 });
+    // Even a payment prepared earlier fails once the owner removes the agent.
+    const prepared = await service.prepareAgentPayment(agent, { ...base, requestId: "before-revoke" });
+    await service.revokeAgent(owner, agent.id);
+    assert.equal(chain.agents.has(`${account.address}:${agent.id}`), false);
+    assert.equal(chain.rules.get(mandate.ruleId!)!.revoked, true);
+    assert.throws(() => service.agent(signedHeaders(key, "GET", "/api/agent/me"), "GET", "/api/agent/me", ""), { status: 403 });
+    await assert.rejects(service.submitAgentPayment(agent, { paymentId: prepared.paymentId, authEntry: signEntry(key, agent.id, prepared.authEntry) }), { status: 403 });
+    assert.equal(chain.transfers.filter(transfer => transfer.ruleId === mandate.ruleId).length, 0);
+    assert.equal((await service.workspace(owner)).agents.find(saved => saved.id === agent.id)!.status, "revoked");
+    await assert.rejects(service.grantMandate(owner, agentMandate(agent.id, { requestId: "after" })), { status: 409 });
+    // Added again, the same agent program can reconnect with its key; the removed agent stays removed.
+    const again = await service.createAgent(owner, { name: "Shopping agent again", requestId: "again", connect: true });
+    assert.equal((await service.connectAgent({ code: again.pairing!.code }, key.publicKey())).agentId, again.id);
+    assert.equal(service.agent(signedHeaders(key, "GET", "/api/agent/me"), "GET", "/api/agent/me", "").id, again.id);
+    assert.deepEqual(await service.agentMandates(service.agent(signedHeaders(key, "GET", "/api/agent/me"), "GET", "/api/agent/me", "")), []);
+  } finally { service.close(); }
+});
+
+test("an x402 purchase is recorded only from a confirmed on-chain transfer out of the mandate's account", async () => {
+  const { service, owner, chain } = await fixture();
+  try {
+    const { agent } = await connectedAgent(service, owner);
+    const { mandate } = await service.grantMandate(owner, agentMandate(agent.id));
+    const seller = await sellerAccount(service);
+    const account = (await service.workspace(owner)).accounts[0]!;
+    const paid = "ab".repeat(32); const elsewhere = "cd".repeat(32); const unverified = "ef".repeat(32);
+    chain.chainTransfers.set(paid, { token: chain.usdToken(), from: account.address!, to: seller.address!, amount: 15_000_000n });
+    chain.chainTransfers.set(elsewhere, { token: chain.usdToken(), from: seller.address!, to: account.address!, amount: 1n });
+    chain.chainTransfers.set(unverified, { token: chain.usdToken(), from: account.address!, to: StrKey.encodeContract(randomBytes(32)), amount: 1n });
+    const report = { mandate: mandate.reference, url: "http://localhost:4031/buy/basil", reference: "Basil" };
+    const outcome = await service.recordX402(agent, { ...report, txHash: paid });
+    assert.equal(outcome.status === "paid" && outcome.payment.amount, "1.5");
+    assert.equal((await service.recordX402(agent, { ...report, txHash: paid })).status, "paid", "reporting twice is harmless");
+    assert.equal((await service.workspace(owner)).activity.filter(entry => entry.id === paid).length, 1);
+    await assert.rejects(service.recordX402(agent, { ...report, txHash: elsewhere }), { status: 403 });
+    await assert.rejects(service.recordX402(agent, { ...report, txHash: unverified }), { status: 403 });
+    await assert.rejects(service.recordX402(agent, { ...report, txHash: "12".repeat(32) }), { status: 404 });
+    await assert.rejects(service.recordX402(agent, { ...report, url: "not a url", txHash: "34".repeat(32) }), { status: 400 });
+  } finally { service.close(); }
+});
+
+test("signed agent routes work over HTTP and reject a tampered body", async () => {
+  const { service, owner } = await fixture();
+  const server = createPaymentApp(service).listen(0);
+  try {
+    const port = (server.address() as { port: number }).port;
+    const waiting = await service.createAgent(owner, { name: "HTTP agent", requestId: "http", connect: true });
+    const key = Keypair.random();
+    const call = async (method: string, path: string, payload?: unknown, tamper = false) => {
+      const body = payload === undefined ? "" : JSON.stringify(payload);
+      const headers: Record<string, string> = { ...Object.fromEntries(Object.entries(signedHeaders(key, method, path, body)).map(([name, value]) => [({ key: "x-mandate-agent", time: "x-mandate-time", signature: "x-mandate-signature" } as Record<string, string>)[name]!, value])), ...(body ? { "content-type": "application/json" } : {}) };
+      return fetch(`http://127.0.0.1:${port}${path}`, { method, headers, ...(body ? { body: tamper ? body.replace("}", ',"extra":1}') : body } : {}) });
+    };
+    assert.equal((await call("POST", "/api/agent/connect", { code: waiting.pairing!.code }, true)).status, 401);
+    const connected = await call("POST", "/api/agent/connect", { code: waiting.pairing!.code });
+    assert.equal(connected.status, 201);
+    assert.equal(((await connected.json()) as { agentId: string }).agentId, waiting.id);
+    assert.equal((await call("GET", "/api/agent/me")).status, 200);
+    assert.deepEqual(await (await call("GET", "/api/agent/mandates")).json(), []);
+    const unsigned = await fetch(`http://127.0.0.1:${port}/api/agent/mandates`);
+    assert.equal(unsigned.status, 401);
+  } finally { server.close(); service.close(); }
 });

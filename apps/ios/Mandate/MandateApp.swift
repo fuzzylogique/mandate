@@ -17,7 +17,7 @@ struct MandateApp: App {
 }
 
 enum AppTab: Hashable {
-    case home, mandates, activity, you
+    case home, mandates, agents, activity, you
 }
 
 struct RootView: View {
@@ -31,6 +31,9 @@ struct RootView: View {
             }
             Tab("Mandates", systemImage: "person.2", value: AppTab.mandates) {
                 MandatesView()
+            }
+            Tab("Agents", systemImage: "key", value: AppTab.agents) {
+                AgentsView()
             }
             Tab("Activity", systemImage: "list.bullet", value: AppTab.activity) {
                 ActivityView()

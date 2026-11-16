@@ -1,0 +1,26 @@
+{
+  "description": "Agents that hold their own key, verified on Stellar testnet with pnpm test:agents and the dashboard on 2026-11-15.",
+  "network": "stellar:testnet",
+  "contracts": {
+    "AGENT_REGISTRY_ID": "CAUNHENIZIUTRJ57GCZ2BY7OM6VIQLIF7GA5DBYAJHJ5WLSV5ETKOGHH",
+    "AGENT_VERIFIER_ID": "CAWQMKRQXVOU4IEK4LB4T5SZBGWKD7AN4WTUZJANEUTPJSHMG2JUCV7W",
+    "PAYMENTS_VERIFIED_SMART_POLICY_ID": "CBR4M66YAZTBATCMGPOTYE2T5WAU6MKURKMOGF6VWSFCS757VPX6L2FZ"
+  },
+  "stores": {
+    "FreshMart (verified)": "CDAPRAIQXKHZV2OQOAAY3TUYOREELOKGMHD3HE26FWLZX6MVJYLMCVAZ",
+    "GreenLeaf Market (verified)": "CBOO5ICQ6IOUM5PYUAW4QTTIP5N2HD2T2BN6FQK6J7QY7GK47YCTGU6B",
+    "FreshMarrt (look-alike, not verified)": "CAMBXP3GY4L4YPFEHNBDBUHPL2WQTBAAJ7STRPRTYQH334WHTA546MO3"
+  },
+  "paid": {
+    "Direct payment signed by the agent's own key, submitted by Mandate": "3d4358855198bb6cec18ed0039987706b20abe8e161e09343cf92061d11e1b82",
+    "x402 purchase signed by the agent's own key, settled by the facilitator": "acfd1fbc2579834bd174ad45e2ccaa93c615ae9c36390ba8e08f9274db7e64e3",
+    "Dashboard-granted mandate, paid from the command-line agent": "36ae8c8d1df4da8eb4d301da13d15e63e1accce8de8938400f027b7922d44507"
+  },
+  "refused": [
+    "Verified seller not on the mandate's list: by Mandate (direct) and by the account on chain (x402)",
+    "Look-alike, unverified seller: by Mandate (direct) and by the account on chain (x402)",
+    "Over the spending limit: by Mandate (direct) and by the account on chain (x402)",
+    "Another key posing as the agent: by Mandate (request signature) and by the agent verifier on chain (x402, skipping Mandate)",
+    "Removed agent: by Mandate, and on chain with its real key and old rule (x402, skipping Mandate)"
+  ]
+}

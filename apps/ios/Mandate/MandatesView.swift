@@ -79,6 +79,11 @@ struct MandatesView: View {
                 Text(store.working[mandate.id] ?? mandate.rule)
                     .font(.system(size: 13))
                     .foregroundStyle(Color.soft)
+                if let signer = store.signerLine(mandate) {
+                    Label(signer, systemImage: "key")
+                        .font(.system(size: 12))
+                        .foregroundStyle(Color.glow)
+                }
             }
             Spacer(minLength: 8)
             VStack(alignment: .trailing, spacing: 2) {
@@ -91,7 +96,8 @@ struct MandatesView: View {
         }
         .lineLimit(1)
         .padding(.horizontal, 18)
-        .frame(height: 84)
+        .padding(.vertical, 12)
+        .frame(minHeight: 84)
         .glassEffect(.regular.interactive(), in: .rect(cornerRadius: 28))
         .accessibilityElement(children: .combine)
     }
@@ -184,7 +190,42 @@ struct MandateDetail: View {
         .frame(maxWidth: .infinity)
     }
 
+    @ViewBuilder
     private func errand(_ mandate: Mandate) -> some View {
+        if let signer = store.signerLine(mandate) {
+            // Granted to an agent that holds its own key: nothing secret exists to reveal.
+            VStack(alignment: .leading, spacing: 12) {
+                Text("Who can pay with it").font(.system(size: 18, weight: .semibold))
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "key")
+                        .font(.system(size: 17))
+                        .foregroundStyle(Color.glow)
+                        .frame(width: 24)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(signer)
+                            .font(.system(size: 15, weight: .medium))
+                            .fixedSize(horizontal: false, vertical: true)
+                        if let key = store.agent(mandate.agentId)?.shortKey {
+                            Text(key)
+                                .font(.system(size: 13, design: .monospaced))
+                                .foregroundStyle(Color.soft)
+                        }
+                        Text("The seller list is enforced on chain, and the agent can't raise the limit.")
+                            .font(.system(size: 13))
+                            .foregroundStyle(Color.soft)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+            .padding(18)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .glassPanel()
+        } else {
+            secretPanel(mandate)
+        }
+    }
+
+    private func secretPanel(_ mandate: Mandate) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Pay with this mandate").font(.system(size: 18, weight: .semibold))
             Text("Use the mandate ID and an agent identification registered to this account on the web Pay page or in your payment client.")

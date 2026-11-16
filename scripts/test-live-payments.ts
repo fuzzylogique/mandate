@@ -43,7 +43,7 @@ try {
   save("Smart opening", smart.creationTxHash!); save("Smart verification", smart.verificationTxHash!);
   save("Seller opening", seller.creationTxHash!); save("Seller verification", seller.verificationTxHash!);
   const agent = await service.createAgent(owner, { name: "Buyer", requestId: "buyer" });
-  save("Agent registration", agent.verificationTxHash);
+  save("Agent registration", agent.verificationTxHash!);
   const bankAgent = await service.createAgent(bankOwner, { name: "Second buyer", requestId: "buyer" });
   const created = await service.createMandate(owner, { accountId: smart.id, name: "Third-party purchasing", recipientType: "agent", recipient: "External tester", limit: "0.2", period: "day", expiresAt: new Date(Date.now() + 3600_000).toISOString(), requestId: "mandate" });
   const opening = { account: smart, ...created };

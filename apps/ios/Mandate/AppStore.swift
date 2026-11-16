@@ -19,12 +19,15 @@ final class AppStore {
 
     var overview: Overview?
     var activity: [Activity] = []
+    var agents: [AccountAgent] = []
     /// Set when the account can't be reached.
     var requiresSignIn = false
     var problem: String?
     var banner: Banner?
     /// What each mandate is doing right now, by id, e.g. "Buying…".
     var working: [Int: String] = [:]
+    /// Agents being removed right now, by id.
+    var removingAgents: Set<String> = []
 
     /// Where the Mandate service runs. On a real phone this is the Mac's address.
     var serviceAddress: String {
@@ -65,6 +68,20 @@ final class AppStore {
         activity.filter { $0.blocked && Calendar.current.isDateInToday($0.date) }.count
     }
 
+    /// Agents that can be given a mandate: connected with their own key, or identification only.
+    var eligibleAgents: [AccountAgent] { agents.filter(\.canHoldMandate) }
+
+    func agent(_ id: String?) -> AccountAgent? {
+        guard let id else { return nil }
+        return agents.first { $0.id == id }
+    }
+
+    /// "Signed only by Claude's own key. No secret ID."
+    func signerLine(_ mandate: Mandate) -> String? {
+        guard mandate.signedByAgentKey else { return nil }
+        return "Signed only by \(agent(mandate.agentId)?.name ?? "its agent")'s own key. No secret ID."
+    }
+
     func mandate(_ id: Int) -> Mandate? {
         overview?.mandates.first { $0.id == id }
     }
@@ -88,10 +105,11 @@ final class AppStore {
     func refresh() async {
         let version = sessionVersion
         do {
-            let (newOverview, newActivity) = try await api.workspace()
+            let (newOverview, newActivity, newAgents) = try await api.workspace()
             guard version == sessionVersion else { return }
             overview = newOverview
             activity = newActivity
+            agents = newAgents
             problem = nil
             requiresSignIn = false
 
@@ -106,7 +124,7 @@ final class AppStore {
         } catch {
             guard version == sessionVersion else { return }
             if (error as? APIError)?.status == 401 {
-                requiresSignIn = true; overview = nil; activity = []; seen = nil
+                requiresSignIn = true; overview = nil; activity = []; agents = []; seen = nil
             }
             problem = error.localizedDescription
         }
@@ -115,13 +133,13 @@ final class AppStore {
     func signIn(name: String?, email: String, password: String) async throws {
         try await api.signIn(name: name, email: email, password: password)
         sessionVersion += 1
-        overview = nil; activity = []; seen = nil; requiresSignIn = false
+        overview = nil; activity = []; agents = []; seen = nil; requiresSignIn = false
         await refresh()
     }
     func signOut() async throws {
         try await api.signOut()
         sessionVersion += 1
-        overview = nil; activity = []; seen = nil; requiresSignIn = true
+        overview = nil; activity = []; agents = []; seen = nil; requiresSignIn = true
     }
     func reveal(_ mandate: Mandate) async throws -> String { try await api.reveal(reference: mandate.reference) }
 
@@ -139,8 +157,32 @@ final class AppStore {
 
     // MARK: Actions
 
-    func create(name: String, limit: String, period: String, expiresAt: String, requestId: String) async throws {
-        _ = try await api.createMandate(name: name, limit: limit, period: period, expiresAt: expiresAt, requestId: requestId)
+    @discardableResult
+    func create(name: String, limit: String, period: String, agentId: String?, expiresAt: String, requestId: String) async throws -> Mandate {
+        let mandate = try await api.createMandate(name: name, limit: limit, period: period, agentId: agentId, expiresAt: expiresAt, requestId: requestId)
+        await refresh()
+        return mandate
+    }
+
+    func addAgent(name: String, ownKey: Bool, requestId: String) async throws -> AccountAgent {
+        let agent = try await api.addAgent(name: name, ownKey: ownKey, requestId: requestId)
+        await refresh()
+        return agent
+    }
+
+    /// A fresh one-time code for an agent whose code expired.
+    func newCode(for agent: AccountAgent) async throws -> AccountAgent {
+        let updated = try await api.newPairingCode(agentId: agent.id)
+        if let index = agents.firstIndex(where: { $0.id == updated.id }) { agents[index] = updated }
+        await refresh()
+        return updated
+    }
+
+    /// Takes the agent off the on-chain registry and revokes every mandate it holds.
+    func remove(_ agent: AccountAgent) async throws {
+        removingAgents.insert(agent.id)
+        defer { removingAgents.remove(agent.id) }
+        try await api.removeAgent(agentId: agent.id)
         await refresh()
     }
 

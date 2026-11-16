@@ -2,6 +2,7 @@ import express, { type NextFunction, type Request, type Response } from "express
 import { ServiceError } from "./store.ts";
 import type { StellarPaymentService } from "./stellar-service.ts";
 import { ChatError, createPaymentChats } from "@mandate/langchain/chat";
+import { AGENT_HEADERS } from "@mandate/shared";
 
 function sessionToken(req: Request): string {
   const value = req.headers.cookie?.split(";").map(c => c.trim()).find(c => c.startsWith("mandate_session="));
@@ -17,7 +18,8 @@ export function createPaymentApp(service: StellarPaymentService) {
     await service.stripeWebhook(req.body, req.get("stripe-signature") ?? "");
     res.json({ received: true });
   });
-  app.use(express.json({ limit: "16kb" }));
+  // Agents sign the exact body bytes, so keep them for signature checks.
+  app.use(express.json({ limit: "16kb", verify: (req, _res, buf) => { (req as Request & { rawBody?: string }).rawBody = buf.toString("utf8"); } }));
   app.use((req, res, next) => {
     res.setHeader("Cache-Control", "no-store");
     const origin = req.get("origin");
@@ -64,6 +66,8 @@ export function createPaymentApp(service: StellarPaymentService) {
   });
   app.get("/api/workspace", async (req, res) => res.json(await service.workspace(actor(req))));
   app.post("/api/agents", async (req, res) => res.status(201).json(await service.createAgent(actor(req), body(req))));
+  app.post("/api/agents/:id/pairing", async (req, res) => res.json(await service.newPairingCode(actor(req), req.params.id as string)));
+  app.delete("/api/agents/:id", async (req, res) => { await service.revokeAgent(actor(req), req.params.id as string); res.status(204).end(); });
   app.post("/api/accounts/open", async (req, res) => {
     res.status(201).json(await service.openAccount(actor(req), body(req)));
   });
@@ -75,7 +79,7 @@ export function createPaymentApp(service: StellarPaymentService) {
     res.status(201).json(method === "fiat" ? await service.createFiatCheckout(owner, req.params.id as string, input) : await service.fund(owner, req.params.id as string, input));
   });
   app.get("/api/funding/stripe/:sessionId", async (req, res) => res.json(await service.fiatFundingStatus(actor(req), req.params.sessionId as string)));
-  app.post("/api/mandates", async (req, res) => res.status(201).json(await service.createMandate(actor(req), body(req))));
+  app.post("/api/mandates", async (req, res) => res.status(201).json(await service.grantMandate(actor(req), body(req))));
   app.post("/api/mandates/:id/reveal", (req, res) => res.json(service.revealMandate(actor(req), req.params.id as string)));
   app.delete("/api/mandates/:id", async (req, res) => { await service.revoke(actor(req), req.params.id as string); res.status(204).end(); });
   app.post("/api/payments", async (req, res) => res.status(201).json(await service.pay(actor(req), body(req))));
@@ -106,6 +110,20 @@ export function createPaymentApp(service: StellarPaymentService) {
   app.post("/api/chat/sessions/:id/messages", chatThrottle, async (req, res) => {
     res.json(await chats.send(req.params.id as string, body(req).message));
   });
+  // Agents that hold their own key: every request is signed with it.
+  const agentThrottle = rateLimit(120, 60_000, "Too many agent requests. Try again in a minute.");
+  const signed = (req: Request) => ({ key: req.get(AGENT_HEADERS.key), time: req.get(AGENT_HEADERS.time), signature: req.get(AGENT_HEADERS.signature) });
+  const raw = (req: Request) => (req as Request & { rawBody?: string }).rawBody ?? "";
+  const agent = (req: Request) => service.agent(signed(req), req.method, req.originalUrl, raw(req));
+  app.post("/api/agent/connect", agentThrottle, async (req, res) => {
+    res.status(201).json(await service.connectAgent(body(req), service.verifyKey(signed(req), req.method, req.originalUrl, raw(req))));
+  });
+  app.get("/api/agent/me", agentThrottle, (req, res) => res.json(service.agentConnection(agent(req))));
+  app.get("/api/agent/mandates", agentThrottle, async (req, res) => res.json(await service.agentMandates(agent(req))));
+  app.get("/api/agent/sellers/:address", agentThrottle, async (req, res) => res.json(await service.checkSeller(agent(req), req.params.address as string)));
+  app.post("/api/agent/payments/prepare", agentThrottle, async (req, res) => res.json(await service.prepareAgentPayment(agent(req), body(req))));
+  app.post("/api/agent/payments/submit", agentThrottle, async (req, res) => res.json(await service.submitAgentPayment(agent(req), body(req))));
+  app.post("/api/agent/x402", agentThrottle, async (req, res) => res.json(await service.recordX402(agent(req), body(req))));
   app.get("/api/network", (_req, res) => res.json({ mode: "stellar-testnet", network: service.network }));
   app.get("/api/health", (_req, res) => res.json({ ok: true, mode: "stellar-testnet" }));
   app.use((_req, res) => res.status(404).json({ error: "Route not found" }));

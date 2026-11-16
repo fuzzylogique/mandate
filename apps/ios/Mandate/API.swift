@@ -19,18 +19,21 @@ struct API {
     private struct NewMandate: Encodable {
         let name: String; let limit: String; let period: String
         let recipientType = "agent"
-        let recipient = "Account agents"
+        /// An agent's id, or "Account agents" for any agent registered to the account.
+        let recipient: String
         let expiresAt: String
         let requestId: String
     }
-    private struct Creation: Decodable { let mandate: WorkspaceMandate }
+    private struct NewAgent: Encodable { let name: String; let requestId: String; let connect: Bool? }
+    /// A mandate for an agent that holds its own key comes back without a mandate ID.
+    private struct Creation: Decodable { let mandate: WorkspaceMandate; let mandateId: String? }
     private struct Secret: Decodable { let mandateId: String }
 
     func signIn(name: String?, email: String, password: String) async throws {
         _ = try await send(name == nil ? "auth/login" : "auth/register", method: "POST", body: Credentials(name: name, email: email, password: password))
     }
     func signOut() async throws { _ = try await send("auth/logout", method: "POST") }
-    func workspace() async throws -> (Overview, [Activity]) {
+    func workspace() async throws -> (Overview, [Activity], [AccountAgent]) {
         let workspace: Workspace = try decode(await send("workspace"))
         guard let account = workspace.accounts.first else { throw APIError(message: "Your main account is still being set up.") }
         let token = TokenInfo(id: account.currency, symbol: account.currency)
@@ -44,12 +47,21 @@ struct API {
                 seller: .init(address: entry.destination, name: entry.kind == "funding" ? "Account funding" : entry.destination, domain: "", verified: entry.kind == "payment" && entry.settlement == "stellar-testnet"),
                 item: entry.reference, amount: units(entry.amount), token: .init(id: entry.currency, symbol: entry.currency), txHash: entry.txHash, reason: nil)
         }
-        return (overview, activity)
+        return (overview, activity, workspace.agents ?? [])
     }
-    func createMandate(name: String, limit: String, period: String, expiresAt: String, requestId: String) async throws -> Mandate {
-        let result: Creation = try decode(await send("mandates", method: "POST", body: NewMandate(name: name, limit: limit, period: period, expiresAt: expiresAt, requestId: requestId)))
+    func createMandate(name: String, limit: String, period: String, agentId: String?, expiresAt: String, requestId: String) async throws -> Mandate {
+        let body = NewMandate(name: name, limit: limit, period: period, recipient: agentId ?? "Account agents", expiresAt: expiresAt, requestId: requestId)
+        let result: Creation = try decode(await send("mandates", method: "POST", body: body))
         return result.mandate.view
     }
+    /// `ownKey` agents connect later with a one-time code; the others are registered on chain now.
+    func addAgent(name: String, ownKey: Bool, requestId: String) async throws -> AccountAgent {
+        try decode(await send("agents", method: "POST", body: NewAgent(name: name, requestId: requestId, connect: ownKey ? true : nil)))
+    }
+    func newPairingCode(agentId: String) async throws -> AccountAgent {
+        try decode(await send("agents/\(agentId)/pairing", method: "POST"))
+    }
+    func removeAgent(agentId: String) async throws { _ = try await send("agents/\(agentId)", method: "DELETE") }
     func stop(reference: String) async throws { _ = try await send("mandates/\(reference)", method: "DELETE") }
     func reveal(reference: String) async throws -> String {
         let result: Secret = try decode(await send("mandates/\(reference)/reveal", method: "POST"))
@@ -81,18 +93,17 @@ private func units(_ amount: String) -> String {
 }
 private struct WorkspaceMandate: Decodable {
     let reference: String; let accountId: String; let ruleId: Int?; let name: String; let status: String
-    let limit: String; let spent: String; let period: String; let currency: String?; let createdAt: String
+    let limit: String; let spent: String; let period: String; let currency: String?; let createdAt: String; let agentId: String?
     var view: Mandate {
-        Mandate(reference: reference, ruleId: ruleId ?? -1, name: name, status: status, token: .init(id: currency ?? "USD", symbol: currency ?? "USD"), limit: units(limit), spent: units(spent), period: period, createdAt: createdAt)
+        Mandate(reference: reference, ruleId: ruleId ?? -1, name: name, status: status, token: .init(id: currency ?? "USD", symbol: currency ?? "USD"), limit: units(limit), spent: units(spent), period: period, createdAt: createdAt, agentId: agentId)
     }
 }
 private struct Workspace: Decodable {
     struct Customer: Decodable { let name: String }
     struct Account: Decodable { let id: String; let address: String?; let currency: String; let balance: String }
-    struct Agent: Decodable { let id: String; let name: String }
     struct Entry: Decodable {
         let id: String; let kind: String; let createdAt: String; let destination: String
         let reference: String; let amount: String; let currency: String; let settlement: String; let mandateReference: String?; let agentId: String?; let txHash: String?
     }
-    let customer: Customer; let accounts: [Account]; let mandates: [WorkspaceMandate]; let activity: [Entry]; let agents: [Agent]?
+    let customer: Customer; let accounts: [Account]; let mandates: [WorkspaceMandate]; let activity: [Entry]; let agents: [AccountAgent]?
 }

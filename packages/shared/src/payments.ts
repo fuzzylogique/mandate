@@ -27,8 +27,20 @@ export interface AccountAgent {
   name: string;
   createdAt: string;
   verified: boolean;
-  verificationTxHash: string;
+  /** Absent while an agent is waiting to connect: it is registered on chain when it does. */
+  verificationTxHash?: string;
   explorerUrl?: string;
+  /**
+   * waiting: added in the dashboard, has not connected with its code yet.
+   * connected: holds its own key, registered on chain; only that key can sign as it.
+   * revoked: removed from the registry; it can no longer pay.
+   * Absent for agents registered by identification only (no key of their own).
+   */
+  status?: "waiting" | "connected" | "revoked";
+  /** The agent's own public key (G-address) once connected. Mandate never holds its secret. */
+  publicKey?: string;
+  /** While waiting: the one-time code the agent connects with. */
+  pairing?: { code: string; expiresAt: string };
 }
 
 export interface SpendingAccount {
@@ -72,6 +84,12 @@ export interface AccountMandate {
   verifiedRecipientsOnly?: boolean;
   /** Empty or absent permits any verified seller. Checked at payment time. */
   sellerIds?: number[];
+  /**
+   * Set when the mandate is granted to a connected agent: the on-chain rule's
+   * only signer is that agent's own key, so only it can spend under the mandate.
+   * There is no secret mandate ID for these.
+   */
+  agentId?: string;
 }
 
 export interface PaymentEntry {
@@ -159,6 +177,8 @@ export interface CreateAccountMandateInput {
   period: SpendingPeriod;
   expiresAt: string;
   sellerIds?: number[];
+  /** Grant the mandate to this connected agent; its own key becomes the rule's signer. */
+  agentId?: string;
   requestId?: string;
 }
 
@@ -174,6 +194,8 @@ export interface PaymentNetwork {
   verifiedSmartAccounts?: boolean;
   mandates?: boolean;
   agentVerification?: boolean;
+  /** Contract that checks agent signatures; agents that hold their own key sign for it. */
+  agentVerifier?: string;
   faucet: boolean;
   assets?: { currency: string; tokenContract: string; code?: string; issuer?: string }[];
 }

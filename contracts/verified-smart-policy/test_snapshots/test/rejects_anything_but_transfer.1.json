@@ -25,6 +25,12 @@
                       "val": {
                         "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
                       }
+                    },
+                    {
+                      "key": {
+                        "symbol": "sellers"
+                      },
+                      "val": "void"
                     }
                   ]
                 },
@@ -146,7 +152,22 @@
               },
               "durability": "persistent",
               "val": {
-                "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                "map": [
+                  {
+                    "key": {
+                      "symbol": "registry"
+                    },
+                    "val": {
+                      "address": "CAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAFCT4"
+                    }
+                  },
+                  {
+                    "key": {
+                      "symbol": "sellers"
+                    },
+                    "val": "void"
+                  }
+                ]
               }
             }
           },

@@ -2,7 +2,7 @@
 #![no_std]
 use soroban_sdk::{
     contract, contracterror, contractevent, contractimpl, contracttype, panic_with_error, Address,
-    Env, String,
+    BytesN, Env, String,
 };
 
 const TTL: u32 = 30 * 17_280;
@@ -16,6 +16,9 @@ pub enum DataKey {
 #[derive(Clone, Debug, PartialEq)]
 pub struct AgentInfo {
     pub name: String,
+    /// The agent's own ed25519 key, for agents that hold one. When set, only
+    /// this key can sign as this agent; nobody else can claim its identity.
+    pub public_key: Option<BytesN<32>>,
     pub verified_at_ledger: u32,
 }
 #[contracterror]
@@ -48,7 +51,13 @@ impl AgentRegistry {
     pub fn admin(e: &Env) -> Address {
         e.storage().instance().get(&DataKey::Admin).unwrap()
     }
-    pub fn register(e: &Env, account: Address, agent_id: String, name: String) {
+    pub fn register(
+        e: &Env,
+        account: Address,
+        agent_id: String,
+        name: String,
+        public_key: Option<BytesN<32>>,
+    ) {
         Self::admin(e).require_auth();
         if account.to_string().to_bytes().get(0) != Some(b'C')
             || agent_id.is_empty()
@@ -63,6 +72,7 @@ impl AgentRegistry {
             &key,
             &AgentInfo {
                 name,
+                public_key,
                 verified_at_ledger: e.ledger().sequence(),
             },
         );
@@ -78,6 +88,14 @@ impl AgentRegistry {
     }
     pub fn is_verified(e: &Env, account: Address, agent_id: String) -> bool {
         Self::get(e, account, agent_id).is_some()
+    }
+    /// True if the agent is registered to the account and may sign with `public_key`:
+    /// its own key if it registered one, otherwise any key the account's rule allows.
+    pub fn is_agent_key(e: &Env, account: Address, agent_id: String, public_key: BytesN<32>) -> bool {
+        match Self::get(e, account, agent_id) {
+            Some(info) => info.public_key.map_or(true, |key| key == public_key),
+            None => false,
+        }
     }
     pub fn get(e: &Env, account: Address, agent_id: String) -> Option<AgentInfo> {
         let key = DataKey::Agent(account, agent_id);
@@ -103,7 +121,7 @@ mod test {
         let id = e.register(AgentRegistry, (admin,));
         let client = AgentRegistryClient::new(&e, &id);
         let agent = String::from_str(&e, "agt_buyer");
-        client.register(&account, &agent, &String::from_str(&e, "Buyer"));
+        client.register(&account, &agent, &String::from_str(&e, "Buyer"), &None);
         assert!(client.is_verified(&account, &agent));
         assert!(!client.is_verified(&other, &agent));
         client.revoke(&account, &agent);
@@ -117,8 +135,29 @@ mod test {
             .try_register(
                 &Address::generate(&e),
                 &String::from_str(&e, "agt_buyer"),
-                &String::from_str(&e, "Buyer")
+                &String::from_str(&e, "Buyer"),
+                &None
             )
             .is_err());
+    }
+    #[test]
+    fn an_agent_with_its_own_key_can_only_be_claimed_by_that_key() {
+        let e = Env::default();
+        e.mock_all_auths();
+        let account = Address::generate(&e);
+        let id = e.register(AgentRegistry, (Address::generate(&e),));
+        let client = AgentRegistryClient::new(&e, &id);
+        let own = BytesN::from_array(&e, &[1; 32]);
+        let other = BytesN::from_array(&e, &[2; 32]);
+        let keyed = String::from_str(&e, "agt_keyed");
+        let keyless = String::from_str(&e, "agt_keyless");
+        client.register(&account, &keyed, &String::from_str(&e, "Claude"), &Some(own.clone()));
+        client.register(&account, &keyless, &String::from_str(&e, "Buyer"), &None);
+        assert!(client.is_agent_key(&account, &keyed, &own));
+        assert!(!client.is_agent_key(&account, &keyed, &other));
+        assert!(client.is_agent_key(&account, &keyless, &other));
+        assert!(!client.is_agent_key(&Address::generate(&e), &keyed, &own));
+        client.revoke(&account, &keyed);
+        assert!(!client.is_agent_key(&account, &keyed, &own));
     }
 }
