@@ -33,6 +33,39 @@ async function mockWorkspace(page: Page) {
   });
 }
 
+for (const type of ["traditional", "stellar"] as const) {
+  for (const method of ["fiat", "testnet"] as const) {
+    test(`${type} account supports ${method} funding and retries with the same request ID`, async ({ page }) => {
+      await mockWorkspace(page);
+      let funded = false;
+      const requests: { amount: string; requestId: string; method: string }[] = [];
+      await page.route("**/api/workspace", route => route.fulfill({ json: { ...workspace, accounts: [{ ...account, type, rail: type === "traditional" ? "traditional" : "blockchain", balance: funded ? "112.34" : "100" }] } }));
+      await page.route("**/api/accounts/bank/funding", async route => {
+        requests.push(route.request().postDataJSON());
+        if (requests.length === 1) return route.fulfill({ status: 503, json: { error: "Awaiting testnet confirmation. Retry with the same request ID." } });
+        funded = true;
+        await route.fulfill({ status: 201, json: { id: "confirmed-tx", kind: "funding", amount: "12.34", currency: "USD", txHash: "confirmed-tx" } });
+      });
+      await page.goto("/");
+      await page.getByRole("button", { name: "Add funds", exact: true }).click();
+      const dialog = page.getByRole("dialog", { name: "Add funds" });
+      await expect(dialog.getByRole("radio", { name: /FIAT/ })).toBeChecked();
+      if (method === "testnet") await dialog.getByRole("radio", { name: /Testnet/ }).check();
+      await dialog.getByLabel("Amount (USD)", { exact: true }).fill("12.34");
+      await dialog.getByRole("button", { name: "Add funds", exact: true }).click();
+      await expect(dialog.getByRole("alert")).toContainText("Awaiting testnet confirmation");
+      await expect(page.locator(".balance")).toHaveText("100 USD");
+      await dialog.getByRole("button", { name: "Add funds", exact: true }).click();
+      await expect(dialog).toHaveCount(0);
+      await expect(page.locator(".balance")).toHaveText("112.34 USD");
+      expect(requests).toHaveLength(2);
+      expect(requests[1]).toEqual(requests[0]);
+      expect(requests[0]!.amount).toBe("12.34");
+      expect(requests[0]!.method).toBe(method);
+    });
+  }
+}
+
 test("dashboard refreshes both USD balances when returning after a payment", async ({ page }) => {
   await mockWorkspace(page);
   let paid = false;
@@ -214,7 +247,7 @@ for (const type of ["traditional", "stellar"] as const) {
     await expect(addressField).toHaveAttribute("type", "password");
     await expect(addressField).not.toHaveValue(account.address!);
     await page.getByRole("button", { name: "Show Smart Account address", exact: true }).click();
-    await page.getByRole("button", { name: /Second Traditional account|Second Stellar account/ }).click();
+    await page.getByRole("button", { name: /Second USD account/ }).click();
     await expect(addressField).toHaveAttribute("type", "password");
     await expect(addressField).not.toHaveValue(secondAddress);
     await page.getByRole("button", { name: "Copy Smart Account address", exact: true }).click();
@@ -244,9 +277,12 @@ test("new account confirmation masks and copies its Smart Account address", asyn
   await mockWorkspace(page);
   await mockClipboard(page);
   await page.route("**/api/accounts/open", async route => {
+    expect(route.request().postDataJSON()).not.toHaveProperty("type");
     await route.fulfill({ status: 201, json: { account } });
   });
   await page.goto("/accounts/new");
+  await expect(page.getByRole("radio")).toHaveCount(0);
+  await expect(page.getByText(/Traditional account|Stellar account/)).toHaveCount(0);
   await page.getByLabel("Account name", { exact: true }).fill("Operations");
   await page.getByRole("button", { name: "Open account", exact: true }).click();
   const addressField = page.getByLabel("Smart Account address", { exact: true });

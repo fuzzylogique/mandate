@@ -39,11 +39,6 @@ export interface MandateRecord extends Omit<AccountMandate, "reference" | "enfor
   enforcement?: "service" | "on-chain";
   rail?: "traditional" | "blockchain";
 }
-export interface AnchorDeposit {
-  id: string; accountId: string; amount: string;
-  status: "credited" | "anchored" | "completed";
-  depositTxHash?: string; forwardingTxHash?: string;
-}
 export function validateMandateInput(body: Record<string, unknown>): Pick<AccountMandate, "name" | "recipientType" | "recipient" | "limit" | "period" | "expiresAt"> {
   requireThat(body.recipientType === "person" || body.recipientType === "agent", 400, "Choose a person or agent");
   requireThat(body.period === "day" || body.period === "week" || body.period === "month", 400, "Choose a spending period");
@@ -67,8 +62,6 @@ export interface State {
   entries: EntryRecord[];
   sessions: { hash: string; customerId: string; expiresAt: string }[];
   traditionalUpgrades?: { accountId: string; balance: string; completed: boolean }[];
-  fiatAccounts?: { accountId: string; balance: string }[];
-  anchorDeposits?: AnchorDeposit[];
   demoRequests?: { id: string; fingerprint: string; result: unknown }[];
 }
 export function mandateSpent(state: State, mandate: MandateRecord): bigint {
@@ -83,7 +76,7 @@ const emptyState = (): State => ({ schemaVersion: 1, customers: [], accounts: []
 const publicCustomer = ({ id, name, email }: CustomerRecord): Customer => ({ id, name, email });
 export const publicEntry = ({ ownerId: _owner, actorId: _actor, requestId: _request, mandateId, ...entry }: EntryRecord): PaymentEntry => ({ ...entry, mandateReference: mandateId });
 
-/** Local authentication, workspace ownership and transactional fiat/anchor journals. */
+/** Local authentication, workspace ownership and confirmed payment activity. */
 export class WorkspaceStore {
   private db: DatabaseSync;
   constructor(path: string) {

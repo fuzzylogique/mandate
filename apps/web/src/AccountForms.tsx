@@ -1,5 +1,5 @@
 import { useState, type FormEvent, type ReactNode } from "react";
-import type { AccountMandate, SpendingAccount } from "@mandate/shared";
+import type { AccountMandate, FundingMethod, SpendingAccount } from "@mandate/shared";
 import { formatValue, money } from "./format.ts";
 import { api } from "./api.ts";
 import { Dialog } from "./Dialog.tsx";
@@ -10,20 +10,20 @@ function Field({ label, children }: { label: string; children: ReactNode }) { re
 
 export function AccountForms({ action, onDone, onClose }: Props) {
   const [amount, setAmount] = useState("");
+  const [fundingMethod, setFundingMethod] = useState<FundingMethod>("fiat");
   const [recipient, setRecipient] = useState("");
   const [reference, setReference] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
   const [requestId, setRequestId] = useState(() => crypto.randomUUID());
   const account = action.account;
-  const traditional = account.rail === "traditional";
   const grant = action.kind === "pay" ? action.mandate : undefined;
   const title = action.kind === "fund" ? "Add funds" : "Make a payment";
   const change = (update: () => void) => { update(); setRequestId(crypto.randomUUID()); };
   const submit = async (event: FormEvent) => {
     event.preventDefault(); setBusy(true); setError("");
     try {
-      if (action.kind === "fund") await api.fund(account.id, amount, requestId);
+      if (action.kind === "fund") await api.fund(account.id, amount, requestId, fundingMethod);
       else await api.pay({ accountId: account.id, mandateReference: grant?.reference, amount, destination: recipient, reference, requestId });
       await onDone(); onClose();
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Request failed"); }
@@ -31,8 +31,14 @@ export function AccountForms({ action, onDone, onClose }: Props) {
   };
   return <Dialog title={title} onClose={() => { if (!busy) onClose(); }}>
     <form className="form" onSubmit={event => void submit(event)}>
-      <p className="muted">{account.name} · {account.currency} · {traditional ? "Traditional account" : "Stellar account"}</p>
-      {action.kind === "fund" ? <p className="form-note">{traditional ? "Add demo USD to this account. Your balance updates when funding confirms." : "Add demo USD to your Stellar account. Funding completes automatically."}</p> : <>
+      <p className="muted">{account.name} · {account.currency} account</p>
+      {action.kind === "fund" ? <>
+        <fieldset className="field"><legend>Funding method</legend><div className="opening-choices two-choices">
+          <label className={`opening-choice ${fundingMethod === "fiat" ? "is-selected" : ""}`}><input type="radio" name="funding-method" value="fiat" checked={fundingMethod === "fiat"} disabled={busy} onChange={() => change(() => setFundingMethod("fiat"))} /><span><strong>FIAT</strong><span>Add demo USD. No bank or card charge.</span></span></label>
+          <label className={`opening-choice ${fundingMethod === "testnet" ? "is-selected" : ""}`}><input type="radio" name="funding-method" value="testnet" checked={fundingMethod === "testnet"} disabled={busy} onChange={() => change(() => setFundingMethod("testnet"))} /><span><strong>Testnet</strong><span>Automatically fund with USD on Stellar testnet.</span></span></label>
+        </div></fieldset>
+        <p className="form-note">{fundingMethod === "fiat" ? "Enter an amount to add demo USD. These demo funds settle on Stellar testnet." : "Enter an amount to use the automatic Stellar testnet funding flow. Testnet USD is issued and transferred into your account."} Your balance updates after confirmation.</p>
+      </> : <>
         {grant && <p className="form-note">{grant.name}: {formatValue(grant.spent, grant.currency ?? account.currency)} of {money(grant.limit, grant.currency ?? account.currency)} used. Only verified recipients are allowed.</p>}
         <Field label="Recipient Smart Account address"><input required maxLength={56} value={recipient} disabled={busy} onChange={event => change(() => setRecipient(event.target.value))} placeholder="C…" /></Field>
         <Field label="Payment reference"><input required maxLength={200} value={reference} disabled={busy} onChange={event => change(() => setReference(event.target.value))} /></Field>

@@ -1,16 +1,10 @@
 # Mandate
 
-An email/password payment workspace with two account types:
-
-- **Traditional account:** demo USD funding, settled as issued USD tokens on Stellar testnet.
-- **Stellar account:** a USD Smart Account on Stellar testnet.
-
-Both expose one Smart Account C address and use the same on-chain mandate and payment system.
+An email/password payment workspace with one account-opening flow. Each account exposes one Smart Account C address and uses on-chain mandates and payments. Choose **FIAT** or **Testnet** when adding funds.
 
 The login holds no money. Every account has a private, one-to-one mapping
-between its Smart contract and a Classic wallet. Traditional accounts also have
-a private demo fiat ledger connected to the demo anchor. Opening and funding manage both
-in the background. Users never select or manage the Classic wallet.
+between its Smart contract and a Classic wallet. Add funds issues demo USD directly, without an intermediate fiat ledger.
+Opening and funding manage the wallet mapping in the background. Users never select or manage the Classic wallet.
 
 ## Run
 
@@ -41,36 +35,33 @@ are reused. See [Stellar setup](docs/stellar-testnet.md).
 
 ## Accounts and funding
 
-Choose **Accounts → Open account**, select Traditional or Stellar, and enter a name.
-Both start with zero visible balance.
+Choose **Accounts → Open account** and enter a name. The account starts with zero visible balance. There is no account-type choice.
 
-Both account options automatically provision a dedicated Classic wallet, deploy a
+Accounts automatically provision a dedicated Classic wallet, deploy a
 Smart contract, install asset-specific payment policies, and register the C address
 as a verified recipient. The dashboard shows the Smart Account address and live
-USD balance. The fiat ledger and Classic wallet remain private.
+USD balance. The Classic wallet remains private.
 
-**Traditional Add funds** accepts demo USD with up to two decimal places:
+**Add funds** offers two methods on every account: **FIAT** adds demo USD without a bank or card charge; **Testnet** uses the existing automatic Stellar testnet funding flow. Both credit the same on-chain USD balance:
 
-1. Credit hardcoded, simulated USD in the account's private fiat ledger.
-2. The demo anchor consumes that credit and issues the same amount of testnet USD
-   into the mapped Classic wallet, creating its trustline automatically.
-3. Transfer the USD tokens through their Stellar Asset Contract into the mapped Smart Account.
+1. Choose FIAT or Testnet, enter a USD amount with up to two decimal places and click **Add funds**.
+2. The demo issuer sends that exact amount to the account's mapped Classic wallet, creating its USD trustline automatically.
+3. The service forwards the USD tokens through their Stellar Asset Contract into the Smart Account.
+4. After forwarding confirms, the dashboard refreshes its on-chain USD balance and shows the funding receipt.
 
-The USD issuer key is generated once and encrypted in the database's custody vault.
-Its public issuer address and token contract are available in `/api/network`.
-This token represents fake demo dollars, not USDC or redeemable money. The anchor
-is a local demo adapter; it does not connect to a bank or implement a hosted SEP-24 service.
+There is no fiat ledger, external deposit provider, onboarding page or bank/card charge.
+The local demo issuer's private key is encrypted in the custody vault and reused
+across restarts. Its public issuer address and token contract are exposed in
+`/api/network`. These tokens represent fake demo dollars, not USDC or redeemable money.
+The Classic wallet retains XLM privately for reserves and fees.
 
-**Stellar Add funds** also deposits demo USD tokens into the mapped Classic wallet,
-then transfers them into Smart. Both account options accept USD amounts with up to
-two decimal places. The Classic wallet retains XLM privately for reserves and fees.
-
-Both funding transactions persist before broadcast. Repeating an unchanged request
-resumes interrupted funding without issuing fiat, depositing tokens or forwarding
-them twice. Only confirmed forwarding creates a successful funding receipt.
+Deposits accept up to 1,000,000 demo USD per request. Both funding transactions
+persist before broadcast. Repeating an unchanged request resumes interrupted
+funding without issuing or forwarding tokens twice. Only confirmed forwarding
+creates a successful funding receipt.
 
 All payments transfer from a Smart C address to another verified Smart C address.
-Both account options fund, receive and spend the same demo USD token. The dashboard
+All accounts fund, receive and spend the same demo USD token. The dashboard
 shows only the actual on-chain USD balance. Smart Account addresses start masked;
 **Show Smart Account address** reveals them, and **Hide Smart Account address**
 masks them again. **Copy Smart Account address** works while masked. Mandates and payments always use USD,
@@ -85,7 +76,7 @@ Payments back to the source account are rejected.
 
 ## Mandates and third-party payments
 
-There is one mandate flow for both account options. A mandate grants a person or
+There is one mandate flow for all accounts. A mandate grants a person or
 agent spending access to an existing Smart Account's USD balance.
 Creating one does not open an account or create another balance.
 
@@ -115,11 +106,9 @@ funds decline payment. Unchanged retries reuse their request ID. Pending blockch
 transactions are reported as pending until confirmed.
 
 Existing local traditional accounts are upgraded when their workspace loads:
-their old demo balances are anchored exactly once into testnet USD, with recovery
+their old demo balances are issued exactly once into testnet USD, with recovery
 across restarts. Old service-only mandates are retained as revoked records and must
-be recreated; their prior permissions are not silently renewed. Existing Stellar
-accounts retain their addresses. Older XLM mandate rules retain their original
-asset scope and must be replaced with a new USD mandate to pay through the app.
+be recreated. Existing XLM remains on chain and is not displayed as USD.
 
 ## Seller verification
 
@@ -137,7 +126,7 @@ checks that same registry during on-chain authorization. A mandate additionally
 checks its spending limit. Revoking a recipient's registry entry blocks later payments.
 
 The prototype automatically attests accounts it opens. It does not perform KYC,
-business verification or domain-ownership verification. Both account options use
+business verification or domain-ownership verification. All accounts use
 this same registry verification.
 
 ## Configuration and storage
@@ -146,7 +135,7 @@ this same registry verification.
 
 | Setting | Purpose |
 |---|---|
-| `PAYMENTS_CHAIN_DB` | Workspace, private demo fiat/anchor journal, encrypted custody vault and transaction journal; defaults to `workspace.sqlite` in the API directory |
+| `PAYMENTS_CHAIN_DB` | Workspace, encrypted custody vault and transaction journal; defaults to `workspace.sqlite` in the API directory |
 | `PAYMENTS_ENCRYPTION_KEY` | 32-byte hex custody key generated by `setup:payments` |
 | `PAYMENTS_RPC_URL` | Stellar testnet RPC endpoint |
 | `PAYMENTS_HORIZON_URL` | Testnet account activation lookup |
@@ -168,7 +157,7 @@ AES-256-GCM. Passwords use salted scrypt hashes; sessions and mandate IDs are
 authenticated by their hashes. Ordinary workspace, preview and payment responses
 exclude the secret ID. Records and receipts use a separate non-secret `reference`
 for management and auditing. The on-chain rule ID and signing mechanism are unchanged.
-Demo fiat and anchor journal mutations commit atomically in SQLite. Stellar envelopes persist before
+Stellar envelopes persist before
 broadcast and retain their original transaction IDs on retries.
 
 Keep the encryption key with its database. Changing keys or contract configuration
@@ -181,8 +170,8 @@ workspace schema and does not migrate other database layouts.
 |---|---|
 | `POST /api/auth/register`, `/api/auth/login`, `/api/auth/logout` | Email/password sessions |
 | `GET /api/workspace` | Visible accounts, mandates and activity |
-| `POST /api/accounts/open` | Open with `type: "traditional"` or `"stellar"`, name and request ID |
-| `POST /api/accounts/:id/funding` | Add funds to that account; requires amount and request ID |
+| `POST /api/accounts/open` | Open with name and request ID; legacy `type` values remain supported |
+| `POST /api/accounts/:id/funding` | Funding with `method: "fiat"` or `"testnet"`, amount and request ID; omitted method defaults to FIAT; returns HTTP 201 after confirmation |
 | `POST /api/mandates` | Create a mandate on an existing source account |
 | `POST /api/mandates/:reference/reveal` | Owner-only retrieval of the secret mandate ID for Show mandate |
 | `DELETE /api/mandates/:reference` | Revoke a mandate using its non-secret record reference |
@@ -216,17 +205,17 @@ pnpm --filter @mandate/web exec playwright install chromium
 pnpm test:ui
 ```
 
-To verify real contract deployment, automatic funding, Smart-to-Smart payments,
-mandate limits and revocation with fresh wallets and testnet funds:
+To verify real contract deployment, automatic demo USD funding, Smart-to-Smart
+payments, mandate limits and revocation with fresh wallets and testnet funds:
 
 ```bash
 pnpm test:chain
 ```
 
-Current USD anchor and unified mandate verification receipts are in
+Historical local-demo USD anchor and unified mandate verification receipts are in
 [unified-mandate-verification.json](docs/unified-mandate-verification.json).
 Earlier XLM-only verification receipts are in
 [stellar-account-verification.json](docs/stellar-account-verification.json).
 Verification of payments using only the secret mandate ID is in
 [secret-mandate-verification.json](docs/secret-mandate-verification.json).
-Fiat funding is simulated; all new payment settlement uses Stellar testnet only.
+Funding directly issues demo USD; all new payment settlement uses Stellar testnet only.

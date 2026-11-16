@@ -1,4 +1,4 @@
-import type { AccountOpening, MandateCreation, CreateAccountMandateInput, Customer, MandatePaymentInput, MandatePaymentPreview, MandatePaymentResult, OpenAccountInput, PaymentEntry, PaymentNetwork, PaymentWorkspace, SpendingAccount } from "@mandate/shared";
+import type { AccountOpening, FundingMethod, MandateCreation, CreateAccountMandateInput, Customer, MandatePaymentInput, MandatePaymentPreview, MandatePaymentResult, OpenAccountInput, PaymentEntry, PaymentNetwork, PaymentWorkspace, SpendingAccount } from "@mandate/shared";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -21,7 +21,7 @@ export const api = {
   login: (input: { email: string; password: string }) => request<Customer>("/auth/login", "POST", input),
   logout: () => request<void>("/auth/logout", "POST"),
   openAccount: (input: OpenAccountInput) => request<AccountOpening>("/accounts/open", "POST", input),
-  fund: (id: string, amount: string, requestId: string) => request<PaymentEntry>(`/accounts/${id}/funding`, "POST", { amount, requestId }),
+  fund: (id: string, amount: string, requestId: string, method: FundingMethod) => request<PaymentEntry>(`/accounts/${id}/funding`, "POST", { amount, requestId, method }),
   createMandate: (input: CreateAccountMandateInput) => request<MandateCreation>("/mandates", "POST", input),
   revealMandate: (reference: string) => request<{ mandateId: string }>(`/mandates/${encodeURIComponent(reference)}/reveal`, "POST"),
   revoke: (id: string) => request<void>(`/mandates/${id}`, "DELETE"),

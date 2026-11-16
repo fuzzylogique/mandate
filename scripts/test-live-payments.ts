@@ -21,6 +21,7 @@ await new Promise<void>(resolve => server.once("listening", resolve));
 const port = (server.address() as { port: number }).port;
 const receipts: { step: string; txHash: string }[] = [];
 const save = (step: string, txHash: string) => { receipts.push({ step, txHash }); console.log(`${step}: ${txHash}`); };
+
 try {
   const registered = await service.register({ name: "Two-option integration", email: `test-${Date.now()}@example.com`, password: "generated test account password" });
   const owner = service.authenticate(registered.token);
@@ -137,12 +138,10 @@ try {
   const usdAsset = chain.network.assets!.find(asset => asset.currency === "USD")!;
   assert.ok(usdAsset.issuer && usdAsset.tokenContract !== chain.network.tokenContract);
   const journal = new (await import("../apps/receipts/src/payments/store.ts")).WorkspaceStore(path);
-  const anchorDeposit = journal.read().anchorDeposits![0]!;
-  assert.equal(anchorDeposit.status, "completed");
-  assert.ok(anchorDeposit.depositTxHash && anchorDeposit.forwardingTxHash && anchorDeposit.depositTxHash !== anchorDeposit.forwardingTxHash);
-  assert.equal(journal.read().fiatAccounts![0]!.balance, "0");
+  assert.equal("fiatAccounts" in journal.read(), false);
+  assert.equal("anchorDeposits" in journal.read(), false);
   journal.close();
-  const proof = { fundingTransactions, network: chain.network.id, policy: config.verifiedSmartPolicy, usdAsset, anchorDeposit, traditionalAccount: { source: bank.address, recipient: bankSeller.address, paymentId: demoPayment.id }, smart: smart.address, seller: seller.address, mandate: { reference: mandate.reference, account: opening.account.address }, checks: ["login holds no funds", "one-to-one private mapping", "single Add funds deposits then forwards", "Smart to Smart payment", "third-party without owner session", "idempotent retry", "wrong mandate ID rejected", "Classic recipient rejected", "unverified Smart recipient rejected", "spending limit enforced on chain", "revocation enforced on chain", "USD mandate cannot authorize XLM with sufficient XLM balance", "USD mandate to Stellar account", "USD-only balances and mandates for both account options"], receipts };
+  const proof = { fundingTransactions, network: chain.network.id, policy: config.verifiedSmartPolicy, usdAsset, traditionalAccount: { source: bank.address, recipient: bankSeller.address, paymentId: demoPayment.id }, smart: smart.address, seller: seller.address, mandate: { reference: mandate.reference, account: opening.account.address }, checks: ["login holds no funds", "one-to-one private mapping", "direct funding without fiat ledger", "single Add funds deposits then forwards", "Smart to Smart payment", "third-party without owner session", "idempotent retry", "wrong mandate ID rejected", "Classic recipient rejected", "unverified Smart recipient rejected", "spending limit enforced on chain", "revocation enforced on chain", "USD mandate cannot authorize XLM with sufficient XLM balance", "USD mandate to Stellar account", "USD-only balances and mandates for both account options"], receipts };
   assert.equal(JSON.stringify(proof).includes(usdGrant.mandateId), false);
   assert.equal(JSON.stringify(proof).includes(opening.mandateId), false, "Public receipts must not contain the secret mandate ID");
   writeFileSync(join(directory, "receipts.json"), JSON.stringify(proof, null, 2));

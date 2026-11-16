@@ -138,7 +138,7 @@ test("funding and payments use network addresses and only journal confirmed rece
     const input = { amount: "10", requestId: "fund" };
     const entry = await service.fund(owner, account.id, input);
     assert.equal(entry.destination, account.address);
-    assert.equal(entry.source, "Added funds");
+    assert.equal(entry.source, "Demo USD deposit");
     assert.equal(chain.deposits[0]!.destination, chain.wallet(chain.owners.get(account.id)!).address);
     assert.equal(entry.settlement, "stellar-testnet"); assert.ok(entry.txHash);
     await service.fund(owner, account.id, input);
@@ -229,6 +229,7 @@ test("chain configuration derives the asset contract and rejects missing encrypt
     assert.equal(gateway.network.currency, "XLM"); assert.equal(gateway.network.rpcUrl, "https://rpc.example");
     assert.ok(StrKey.isValidContract(gateway.network.tokenContract));
     assert.equal(gateway.network.smartAccounts, false);
+    assert.equal(gateway.network.assets!.find(asset => asset.currency === "USD")!.issuer, gateway.treasury("anchor:USD:issuer").address);
   } finally { gateway.close(); }
 });
 
@@ -239,7 +240,7 @@ async function openWithMandate(service: StellarPaymentService, owner: ReturnType
   return { account, ...grant };
 }
 
-test("only Traditional and Stellar openings are accepted and internal wallets cannot be selected", async () => {
+test("legacy opening types are validated and internal wallets cannot be selected", async () => {
   const { chain, service, owner } = await fixture();
   try {
     for (const type of ["classic", "smart", "mandate"]) await assert.rejects(service.openAccount(owner, { name: "Invalid", type, requestId: type }), { status: 400 });
@@ -360,7 +361,7 @@ test("/pay accepts a secret mandate ID without an owner cookie or separate crede
   assert.equal((await revoked.json() as { status: string }).status, "declined");
 });
 
-test("traditional accounts expose one verified Smart Account and keep their Classic and fiat layers private", async () => {
+test("traditional accounts expose one verified Smart Account and keep their Classic wallet private", async () => {
   const { chain, service, owner } = await fixture();
   try {
     const wallets = chain.wallets.size;
@@ -685,8 +686,30 @@ test("stored mandates preserve signing rules and secret IDs through normalizatio
   } finally { service.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
+test("Add funds directly confirms the entered demo USD amount and processes retries once", async t => {
+  const { chain, service, owner, token } = await fixture();
+  const source = (await service.openAccount(owner, { name: "Demo USD", type: "traditional", requestId: "source" })).account;
+  const server = createPaymentApp(service).listen(0, "127.0.0.1");
+  await new Promise<void>(resolve => server.once("listening", resolve));
+  t.after(() => { server.close(); service.close(); });
+  const port = (server.address() as { port: number }).port;
+  const send = () => fetch(`http://127.0.0.1:${port}/api/accounts/${source.id}/funding`, { method: "POST", headers: { "content-type": "application/json", cookie: `mandate_session=${token}` }, body: JSON.stringify({ amount: "12.34", requestId: "demo-funding" }) });
+  const completed = await send();
+  assert.equal(completed.status, 201);
+  const receipt = await completed.json() as { id: string; amount: string; source: string };
+  assert.equal(receipt.amount, "12.34");
+  assert.equal(receipt.source, "Demo USD deposit");
+  assert.equal((await (await send()).json() as { id: string }).id, receipt.id);
+  assert.equal(chain.deposits.length, 1);
+  assert.equal(chain.deposits[0]!.amount, 123_400_000n);
+  assert.equal(chain.transfers.length, 1);
+  const view = await service.workspace(owner);
+  assert.equal(view.accounts[0]!.balance, "12.34");
+  assert.equal(view.activity.length, 1);
+});
+
 for (const stage of ["deposit", "forward"] as const) {
-  test(`demo USD funding recovers after a ${stage} failure and restart without duplicating fiat or tokens`, async () => {
+  test(`direct USD funding recovers after a ${stage} failure and restart without a fiat ledger or duplicate tokens`, async () => {
     const directory = mkdtempSync(join(tmpdir(), "mandate-anchor-recovery-"));
     const path = join(directory, "workspace.sqlite");
     const fixtureResult = await fixture(path);
@@ -699,9 +722,10 @@ for (const stage of ["deposit", "forward"] as const) {
       chain.fail = stage === "deposit"; chain.failFunding = stage === "forward";
       await assert.rejects(service.fund(owner, source.id, input));
       const pending = store.read();
-      assert.equal(pending.anchorDeposits!.length, 1);
-      assert.equal(pending.anchorDeposits![0]!.status, stage === "deposit" ? "credited" : "anchored");
-      assert.equal(pending.fiatAccounts![0]!.balance, stage === "deposit" ? "12.34" : "0");
+      assert.equal("fiatAccounts" in pending, false);
+      assert.equal("anchorDeposits" in pending, false);
+      const internal = chain.wallet(chain.owners.get(source.id)!);
+      assert.equal(await chain.balance(internal, "USD"), stage === "deposit" ? 0n : 123_400_000n);
       assert.equal((await service.workspace(owner)).activity.length, 0);
       await assert.rejects(service.fund(owner, source.id, { ...input, amount: "13" }), { status: 409 });
       service.close(); service = new StellarPaymentService(path, chain);
@@ -710,15 +734,14 @@ for (const stage of ["deposit", "forward"] as const) {
       assert.equal((await service.fund(owner, source.id, input)).txHash, paid.txHash);
       assert.equal(chain.deposits.length, 1); assert.equal(chain.transfers.length, 1);
       assert.equal(chain.deposits[0]!.currency, "USD");
+      assert.equal(chain.deposits[0]!.amount, 123_400_000n);
       assert.equal(chain.transfers[0]!.currency, "USD");
       assert.equal(await chain.balance(chain.wallet(source.id), "USD"), 123_400_000n);
       assert.equal(await chain.balance(chain.wallet(source.id), "XLM"), 0n);
       const journal = store.read();
-      assert.equal(journal.anchorDeposits!.length, 1);
-      assert.equal(journal.anchorDeposits![0]!.status, "completed");
-      assert.ok(journal.anchorDeposits![0]!.depositTxHash);
-      assert.equal(journal.anchorDeposits![0]!.forwardingTxHash, paid.txHash);
-      assert.equal(journal.fiatAccounts![0]!.balance, "0");
+      assert.equal("fiatAccounts" in journal, false);
+      assert.equal("anchorDeposits" in journal, false);
+      assert.equal(await chain.balance(internal, "USD"), 0n);
       const view = await service.workspace(owner);
       assert.equal(view.accounts.length, 1); assert.equal(view.activity.length, 1);
       assert.equal(JSON.stringify(view).includes(chain.wallet(chain.owners.get(source.id)!).address), false);
@@ -820,4 +843,35 @@ test("legacy Stellar metadata and cached openings expose USD without reinterpret
     assert.equal(await chain.balance(chain.wallet(account.id), "USD"), 35_000_000n);
     assert.equal(await chain.balance(chain.wallet(account.id), "XLM"), 500_000_000n);
   } finally { store.close(); service.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("one account can be opened without a type and funded by FIAT or automatic Testnet", async () => {
+  const { chain, service, owner } = await fixture();
+  try {
+    const input = { name: "Operations", requestId: "unified-opening" };
+    const opened = await service.openAccount(owner, input);
+    assert.equal((await service.openAccount(owner, input)).account.id, opened.account.id);
+    assert.ok(StrKey.isValidContract(opened.account.address!));
+    assert.equal(opened.account.balance, "0");
+    assert.equal(opened.account.verified, true);
+    const fiat = { amount: "12.34", method: "fiat", requestId: "fiat-funding" };
+    const testnet = { amount: "5", method: "testnet", requestId: "testnet-funding" };
+    const deposit = await service.fund(owner, opened.account.id, fiat);
+    const funding = await service.fund(owner, opened.account.id, testnet);
+    assert.equal(deposit.source, "Demo USD deposit");
+    assert.equal(funding.source, "Stellar testnet funding");
+    assert.equal(funding.reference, "Testnet funding");
+    assert.equal((await service.fund(owner, opened.account.id, fiat)).id, deposit.id);
+    assert.equal((await service.fund(owner, opened.account.id, testnet)).id, funding.id);
+    await assert.rejects(service.fund(owner, opened.account.id, { ...fiat, method: "testnet" }), { status: 409 });
+    await assert.rejects(service.fund(owner, opened.account.id, { ...testnet, method: "fiat" }), { status: 409 });
+    await assert.rejects(service.fund(owner, opened.account.id, { ...fiat, method: "invalid", requestId: "invalid-method" }), { status: 400 });
+    assert.equal(chain.deposits.length, 2);
+    assert.equal(chain.transfers.length, 2);
+    assert.ok(chain.deposits.every(deposit => deposit.currency === "USD"));
+    const workspace = await service.workspace(owner);
+    assert.equal(workspace.accounts.length, 1);
+    assert.equal(workspace.accounts[0]!.balance, "17.34");
+    assert.equal(workspace.activity.length, 2);
+  } finally { service.close(); }
 });

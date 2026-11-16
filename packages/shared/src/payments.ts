@@ -1,6 +1,7 @@
 /** Login identities own financial accounts; they never hold funds themselves. */
 export type PaymentRail = "traditional" | "blockchain";
 export type AccountType = "traditional" | "stellar";
+export type FundingMethod = "fiat" | "testnet";
 export type PaymentCurrency = string;
 export type SpendingPeriod = "day" | "week" | "month";
 
@@ -77,7 +78,8 @@ export interface PaymentWorkspace {
 
 export interface OpenAccountInput {
   name: string;
-  type: "traditional" | "stellar";
+  /** Optional legacy account classification. New accounts need only a name. */
+  type?: "traditional" | "stellar";
   requestId: string;
 
 }

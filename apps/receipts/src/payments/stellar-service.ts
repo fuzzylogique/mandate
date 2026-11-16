@@ -1,10 +1,10 @@
 import { createHash, randomBytes } from "node:crypto";
 import { StrKey } from "@stellar/stellar-sdk";
 import { formatAmount, toBaseUnits } from "@mandate/shared";
-import type { AccountMandate, AccountOpening, MandatePaymentPreview, PaymentEntry, PaymentWorkspace, SpendingAccount } from "@mandate/shared";
+import type { AccountMandate, AccountOpening, FundingMethod, MandatePaymentPreview, PaymentEntry, PaymentWorkspace, SpendingAccount } from "@mandate/shared";
 import { WorkspaceStore, ServiceError, amount, requireThat, text, validateMandateInput, type Actor, type EntryRecord, type MandateRecord, type StellarAccountPair, publicEntry } from "./store.ts";
 import type { ChainGateway, ChainReceipt } from "./stellar.ts";
-import { DemoUsdAnchor, bankingAmount } from "./traditional.ts";
+import { fundingAmount } from "./funding.ts";
 
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 const timestamp = () => new Date().toISOString();
@@ -16,13 +16,11 @@ export class StellarPaymentService {
   readonly network;
   private core: WorkspaceStore;
   private chain: ChainGateway;
-  private anchor: DemoUsdAnchor;
   constructor(path: string, chain: ChainGateway) {
     this.core = new WorkspaceStore(path);
     this.chain = chain;
     const usd = chain.network.assets?.find(asset => asset.currency === "USD");
     this.network = { ...chain.network, currency: "USD", tokenContract: usd?.tokenContract ?? chain.network.tokenContract, assets: usd ? [usd] : undefined };
-    this.anchor = new DemoUsdAnchor(this.core);
   }
   close() { this.core.close(); this.chain.close(); }
   register(body: Record<string, unknown>) { return this.core.register(body); }
@@ -107,8 +105,8 @@ export class StellarPaymentService {
   async createAccount(actor: Actor, body: Record<string, unknown>): Promise<SpendingAccount> {
     this.customer(actor);
     const name = text(body.name, "Account name");
-    const type = body.type;
-    requireThat(type === "traditional" || type === "stellar", 400, "Choose Traditional account or Stellar account");
+    const type = body.type ?? "stellar";
+    requireThat(type === "traditional" || type === "stellar", 400, "Invalid account type");
     requireThat(!body.parentId && !body.classicAccountId, 400, "Account setup is managed automatically");
     requireThat(!body.rail || body.rail === (type === "traditional" ? "traditional" : "blockchain"), 400, "The account type and payment method do not match");
     const requestId = text(body.requestId, "Idempotency key", 100);
@@ -157,28 +155,27 @@ export class StellarPaymentService {
     });
   }
   async openAccount(actor: Actor, body: Record<string, unknown>): Promise<AccountOpening> {
-    requireThat(body.type === "traditional" || body.type === "stellar", 400, "Choose Traditional account or Stellar account");
     return { account: await this.createAccount(actor, body) };
   }
   async fund(actor: Actor, id: string, body: Record<string, unknown>) {
+    const method = body.method ?? "fiat";
+    requireThat(method === "fiat" || method === "testnet", 400, "Choose FIAT or Testnet funding");
     let target = this.owned(actor, id);
     if (!target.address || !StrKey.isValidContract(target.address) || this.upgradePending(target.id)) { await this.upgradeTraditional(target); target = this.owned(actor, id); }
     requireThat(!body.sourceAccountId && !body.classicAccountId, 400, "Funding is managed automatically");
-    const units = bankingAmount(body.amount);
+    const units = fundingAmount(body.amount);
     const commandId = this.commandId(actor, "add-funds", body.requestId);
-    return this.chain.command(commandId, { accountId: id, amount: decimal(units) }, () => this.fundAccount(actor, target, units, commandId));
+    // Keep existing FIAT retries compatible with requests made before method selection.
+    return this.chain.command(commandId, { accountId: id, amount: decimal(units), ...(method === "testnet" ? { method } : {}) }, () => this.fundAccount(actor, target, units, commandId, method === "testnet" ? "Testnet funding" : "Account funding", method));
   }
-  private async fundAccount(actor: Actor, target: SpendingAccount, units: bigint, commandId: string, reference = "Account funding") {
+  private async fundAccount(actor: Actor, target: SpendingAccount, units: bigint, commandId: string, reference = "Account funding", method: FundingMethod = "fiat") {
     const currency = "USD";
     const source = this.chain.treasury(this.pair(target).classicWalletId);
-    if (target.type === "traditional") this.anchor.credit(commandId, target.id, units);
     if (!this.chain.hasTransaction(commandId) && await this.chain.balance(source) === 0n) await this.chain.faucet(source);
-    const deposit = await this.chain.deposit(commandId, source, units, currency);
-    if (target.type === "traditional") this.anchor.anchored(commandId, deposit.txHash);
+    await this.chain.deposit(commandId, source, units, currency);
     const destination = this.chain.wallet(target.id);
     const receipt = await this.chain.transfer(commandId, source, source, destination.address, units, undefined, currency);
-    if (target.type === "traditional") this.anchor.completed(commandId, receipt.txHash);
-    return this.record({ ownerId: target.ownerId, actorId: actor.id, accountId: target.id, source: target.type === "traditional" ? "Demo USD deposit" : "Added funds", destination: destination.address, kind: "funding", amount: decimal(units), currency, mandateId: null, reference, requestId: commandId }, receipt);
+    return this.record({ ownerId: target.ownerId, actorId: actor.id, accountId: target.id, source: method === "fiat" ? "Demo USD deposit" : "Stellar testnet funding", destination: destination.address, kind: "funding", amount: decimal(units), currency, mandateId: null, reference, requestId: commandId }, receipt);
   }
   async createMandate(actor: Actor, body: Record<string, unknown>) {
     const account = this.owned(actor, body.accountId);

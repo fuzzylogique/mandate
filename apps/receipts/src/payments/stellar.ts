@@ -193,6 +193,10 @@ export class StellarGateway implements ChainGateway {
     requireThat(currency === "XLM" || currency === "USD", 400, "Unsupported payment currency");
     return currency === "USD" ? this.usdAsset : this.asset;
   }
+  private ownerPaymentKey(id: string, currency = "XLM"): string {
+    // Keep rules scoped to the actual token when a workspace changes demo assets.
+    return currency === "XLM" ? id : `${id}:${this.paymentAsset(currency).contractId(Networks.TESTNET)}`;
+  }
   async balance(wallet: ChainWallet, currency = "XLM"): Promise<bigint> {
     const asset = this.paymentAsset(currency);
     if (wallet.rail === "classic" && asset.isNative()) return this.nativeBalance(wallet.address);
@@ -248,7 +252,7 @@ export class StellarGateway implements ChainGateway {
     await this.execute("anchor:USD:asset", () => this.contract(this.keypair(issuer.id), Operation.createStellarAssetContract({ asset: this.usdAsset })));
   }
   private async depositUsd(id: string, wallet: ChainWallet, units: bigint): Promise<ChainReceipt> {
-    requireThat(wallet.rail === "classic", 400, "Anchor deposits require the mapped Classic wallet");
+    requireThat(wallet.rail === "classic", 400, "Demo deposits require the mapped Classic wallet");
     await this.ensureUsdAsset();
     const issuer = this.treasury("anchor:USD:issuer");
     if (await this.nativeBalance(issuer.address) === 0n) await this.faucet(issuer);
@@ -356,10 +360,10 @@ export class StellarGateway implements ChainGateway {
     const owner = this.keypair(treasury.id);
     const params = xdr.ScVal.scvMap([new xdr.ScMapEntry({ key: xdr.ScVal.scvSymbol("registry"), val: Address.fromString(this.config.sellerRegistry).toScVal() })]);
     const args = [xdr.ScVal.scvVec([xdr.ScVal.scvSymbol("CallContract"), Address.fromString(tokenContract).toScVal()]), nativeToScVal("smart-payments", { type: "string" }), xdr.ScVal.scvVoid(), xdr.ScVal.scvVec([externalSigner(this.config.verifier!, owner)]), xdr.ScVal.scvMap([new xdr.ScMapEntry({ key: Address.fromString(this.config.verifiedSmartPolicy).toScVal(), val: params })])];
-    const rule = await this.execute(`owner-payment-rule:${currency === "XLM" ? id : `${id}:${currency}`}`, () => this.contract(owner, Operation.invokeContractFunction({ contract: account.address, function: "add_context_rule", args }), { wallet: account, signer: owner, ruleId: 0 }));
+    const rule = await this.execute(`owner-payment-rule:${this.ownerPaymentKey(id, currency)}`, () => this.contract(owner, Operation.invokeContractFunction({ contract: account.address, function: "add_context_rule", args }), { wallet: account, signer: owner, ruleId: 0 }));
     requireThat(rule.result, 502, "Smart-account payment rule was not returned");
     const ruleId = (scValToNative(xdr.ScVal.fromXDR(rule.result, "base64")) as { id: number }).id;
-    this.db.prepare("INSERT OR IGNORE INTO chain_owner_payment_rules VALUES (?, ?)").run(currency === "XLM" ? id : `${id}:${currency}`, ruleId);
+    this.db.prepare("INSERT OR IGNORE INTO chain_owner_payment_rules VALUES (?, ?)").run(this.ownerPaymentKey(id, currency), ruleId);
     return verified;
   }
   async transfer(id: string, treasury: ChainWallet, source: ChainWallet, destination: string, units: bigint, mandate?: { id: string; ruleId: number }, currency = "XLM"): Promise<ChainReceipt> {
@@ -367,7 +371,7 @@ export class StellarGateway implements ChainGateway {
     requireThat(StrKey.isValidEd25519PublicKey(destination) || StrKey.isValidContract(destination), 400, "Enter a valid Stellar recipient address");
     const payer = this.keypair(treasury.id);
     if (source.rail === "blockchain" && !mandate && currency === "USD") {
-      const installed = this.db.prepare("SELECT rule_id FROM chain_owner_payment_rules WHERE id=?").get(`${source.id}:USD`);
+      const installed = this.db.prepare("SELECT rule_id FROM chain_owner_payment_rules WHERE id=?").get(this.ownerPaymentKey(source.id, currency));
       if (!installed) await this.verifySmartAccount(source.id, source, treasury, currency);
     }
     if (source.rail === "classic" && destination.startsWith("G")) {
@@ -376,7 +380,7 @@ export class StellarGateway implements ChainGateway {
     return this.execute(id, async () => {
       const op = Operation.invokeContractFunction({ contract: asset.contractId(Networks.TESTNET), function: "transfer", args: [Address.fromString(source.address).toScVal(), Address.fromString(destination).toScVal(), nativeToScVal(units, { type: "i128" })] });
       if (source.rail === "blockchain") {
-        const savedRule = this.db.prepare("SELECT rule_id FROM chain_owner_payment_rules WHERE id=?").get(currency === "XLM" ? source.id : `${source.id}:${currency}`) as { rule_id: number } | undefined;
+        const savedRule = this.db.prepare("SELECT rule_id FROM chain_owner_payment_rules WHERE id=?").get(this.ownerPaymentKey(source.id, currency)) as { rule_id: number } | undefined;
         const ruleId = mandate?.ruleId ?? savedRule?.rule_id;
         requireThat(ruleId !== undefined, 409, "The account payment rule is missing");
         return this.contract(payer, op, { wallet: source, signer: mandate ? this.keypair(`signer:${mandate.id}`) : payer, ruleId });
