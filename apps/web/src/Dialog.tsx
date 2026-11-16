@@ -8,9 +8,10 @@ interface DialogProps {
   children: ReactNode;
   /** Extra class on the dialog panel. */
   className?: string;
+  variant?: "sheet" | "bare";
 }
 
-export function Dialog({ title, onClose, children, className }: DialogProps) {
+export function Dialog({ title, onClose, children, className, variant = "sheet" }: DialogProps) {
   const panel = useRef<HTMLDivElement>(null);
   const close = useRef(onClose);
   close.current = onClose;
@@ -43,7 +44,7 @@ export function Dialog({ title, onClose, children, className }: DialogProps) {
     >
       <div
         ref={panel}
-        className={`dialog ${className ?? ""}`}
+        className={`dialog is-${variant} ${className ?? ""}`}
         role="dialog"
         aria-modal="true"
         aria-label={title}

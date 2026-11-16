@@ -4,7 +4,7 @@ import { money } from "./format.ts";
 import { api } from "./api.ts";
 import { MandateDetails } from "./MandateDetails.tsx";
 
-export function CreateMandateForm({ workspace, onDone }: { workspace: PaymentWorkspace; onDone: () => Promise<void> }) {
+export function CreateMandateForm({ workspace, onDone, onClose }: { workspace: PaymentWorkspace; onDone: () => Promise<void>; onClose?: () => void }) {
   const [name, setName] = useState("");
   const [holder, setHolder] = useState("");
   const [limit, setLimit] = useState("");
@@ -28,7 +28,7 @@ export function CreateMandateForm({ workspace, onDone }: { workspace: PaymentWor
     } catch (cause) { setError(cause instanceof Error ? cause.message : "Could not create the mandate"); }
     finally { setBusy(false); }
   };
-  if (created) return <section className="card mandate-form-card"><h2 className="form-card-title">Mandate created</h2><MandateDetails {...created} onClose={() => { setCreated(null); setName(""); setHolder(""); setLimit(""); setSellerIds(""); setRequestId(crypto.randomUUID()); }} /></section>;
+  if (created) return <section className="card mandate-form-card is-created"><h2 className="form-card-title">Mandate created</h2><MandateDetails {...created} onClose={() => { onClose?.(); setCreated(null); setName(""); setHolder(""); setLimit(""); setSellerIds(""); setRequestId(crypto.randomUUID()); }} /></section>;
   return <section className="card mandate-form-card"><h2 className="form-card-title">Create a mandate</h2><form className="form" onSubmit={event => void submit(event)}>
     <p className="form-note">{account ? `Main account · ${money(account.balance, account.currency)} available` : "Your main account is awaiting verification. Refresh the dashboard to check again."}</p>
     <label className="field">Mandate name<input required maxLength={120} value={name} disabled={busy} onChange={event => change(() => setName(event.target.value))} placeholder="Team purchasing allowance" /></label>

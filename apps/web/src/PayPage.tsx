@@ -3,6 +3,7 @@ import type { MandatePaymentPreview, MandatePaymentResult, PaymentNetwork } from
 import { formatValue, money } from "./format.ts";
 import { api } from "./api.ts";
 import { SmartAccountAddress } from "./SmartAccountAddress.tsx";
+import { ThemeToggle } from "./ThemeToggle.tsx";
 import { Logo } from "./icons.tsx";
 
 export function PayPage() {
@@ -53,7 +54,7 @@ export function PayPage() {
     finally { setBusy(null); }
   };
   return <div className="page payment-page">
-    <header className="topbar"><a className="brand" href="/"><Logo />Mandate</a><div className="topbar-side"><span className="pill">{network?.name ?? "Connecting…"}</span><a className="button" href="/">Owner dashboard</a></div></header>
+    <header className="glass topbar"><a className="brand" href="/"><Logo />Mandate</a><div className="topbar-side"><span className="pill">{network?.name ?? "Connecting…"}</span><a className="button" href="/">Owner dashboard</a><ThemeToggle /></div></header>
     <main className="public-pay">
       <div className="page-title"><p className="eyebrow">THIRD-PARTY PAYMENT</p><h1>Pay with a mandate.</h1><p className="muted">Use a mandate to pay a verified Smart Account. No owner login is required.</p></div>
       <section className="card"><form className="form pay-form" onSubmit={event => void check(event)}>

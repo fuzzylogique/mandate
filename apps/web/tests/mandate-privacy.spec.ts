@@ -129,6 +129,7 @@ test("newly created mandate is masked and has no separate payment credential", a
   await page.goto("/mandates");
   await expect(page.getByLabel("Payment method", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("combobox", { name: "Currency", exact: true })).toHaveCount(0);
+  await page.getByRole("button", { name: "New mandate", exact: true }).click();
   await page.getByLabel("Mandate name", { exact: true }).fill("Purchasing");
   await page.getByLabel("Mandate holder", { exact: true }).fill("Purchaser");
   await page.getByLabel("Spending limit (USD)", { exact: true }).fill("10");
@@ -329,6 +330,7 @@ test("seller IDs are entered as numbers and saved with a mandate", async ({ page
     await route.fulfill({ status: 201, json: { mandate: { ...mandate, reference: "restricted", sellerIds: input.sellerIds }, mandateId } });
   });
   await page.goto("/mandates");
+  await page.getByRole("button", { name: "New mandate", exact: true }).click();
   const sellerIds = page.getByLabel("Seller IDs (optional)", { exact: true });
   await expect(sellerIds).toHaveAttribute("type", "text");
   await expect(page.getByRole("combobox", { name: /Seller/ })).toHaveCount(0);
@@ -347,6 +349,7 @@ test("seller IDs are entered as numbers and saved with a mandate", async ({ page
   await expect(created.getByText("Allowed seller IDs: 101, 202, 303", { exact: true })).toBeVisible();
   expect(requests).toBe(1);
   await created.getByRole("button", { name: "Done", exact: true }).click();
+  await page.getByRole("button", { name: "New mandate", exact: true }).click();
   await expect(page.getByLabel("Seller IDs (optional)", { exact: true })).toHaveValue("");
 });
 
@@ -386,4 +389,21 @@ test("Agents lists account identities and registers new agents without spending 
   await expect(page.getByText("Verified on chain", { exact: true })).toBeVisible();
   await page.getByRole("button", { name: "Copy identification", exact: true }).click();
   expect(await copiedValues(page)).toEqual([agentId]);
+});
+
+
+test("main's theme toggle persists and mandate cards use the merged wording", async ({ page }) => {
+  await mockWorkspace(page);
+  await page.goto("/mandates");
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "dark");
+  await expect(page.getByRole("img", { name: "100% of the mandate limit remaining", exact: true })).toBeVisible();
+  await page.getByRole("button", { name: "Switch to light mode", exact: true }).click();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await page.reload();
+  await expect(page.locator("html")).toHaveAttribute("data-theme", "light");
+  await expect(page.getByRole("button", { name: "New mandate", exact: true })).toBeVisible();
+  await expect(page.getByText(/shopper/i)).toHaveCount(0);
+  await page.screenshot({ path: test.info().outputPath("dashboard.png"), fullPage: true });
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(await page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth)).toBe(true);
 });

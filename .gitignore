@@ -10,3 +10,8 @@ contracts/target/
 .claude/
 playwright-report/
 test-results/
+
+# Xcode
+xcuserdata/
+*.xcuserstate
+DerivedData/

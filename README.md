@@ -253,3 +253,10 @@ Verification of payments using the previous secret-only payment flow is in
 Funding directly issues demo USD; all new payment settlement uses Stellar testnet only.
 
 Deployed agent-registry and mandate-verifier checks, including a successful identified agent payment and refusal of unknown or foreign account identities, are recorded in [agent-identity-verification.json](docs/agent-identity-verification.json).
+
+
+## iPhone app
+
+The native app from `main` lives in `apps/ios/Mandate.xcodeproj` and uses the same Mandate terminology as the web dashboard. Open it in Xcode with the iOS SDK required by the project, start `pnpm dev`, and run it in the iPhone simulator. Sign in with your workspace email and password; the default API address is `http://localhost:4022`. The app reads `/api/workspace`, creates mandates and revokes them by their record reference. It uses session cookies and converts USD amounts for the native views.
+
+Mandate payments require both the secret mandate ID and an on-chain registered agent identification; use the web Pay page or the LangChain client. The native detail sheet can reveal the mandate ID after owner sign-in. Native build verification requires macOS and Xcode.
