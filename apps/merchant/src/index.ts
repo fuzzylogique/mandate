@@ -91,7 +91,8 @@ const app = express();
 
 // Free: the catalog shoppers compare.
 app.get("/catalog", (req, res) => {
-  const base = `${req.protocol}://${req.get("host")}`;
+  // STORES_URL is the public address when hosted, where the proxy hides the real scheme and port.
+  const base = process.env.STORES_URL?.replace(/\/$/, "") || `${req.protocol}://${req.get("host")}`;
   res.json({
     stores: open.map((store) => ({
       slug: store.slug,
@@ -119,6 +120,7 @@ for (const store of open) {
 }
 
 if (!open.length) console.warn("No store addresses in .env. Run pnpm setup:stores.");
-app.listen(port, "127.0.0.1", () => {
+// MERCHANT_HOST=0.0.0.0 exposes the stores when hosted; the default keeps them on this machine.
+app.listen(port, process.env.MERCHANT_HOST || "127.0.0.1", () => {
   console.log(`demo stores on http://localhost:${port}: ${open.map((store) => store.name).join(", ")}`);
 });

@@ -1,0 +1,16 @@
+.git
+.env
+.env.*
+!.env.example
+**/node_modules
+**/dist
+*.sqlite
+*.sqlite-*
+**/*.sqlite
+**/*.sqlite-*
+apps/ios
+contracts/target
+**/test-results
+**/playwright-report
+.claude
+.DS_Store

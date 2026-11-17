@@ -46,6 +46,35 @@ current contracts, uploads the account WASM, deploys missing shared contracts,
 and privately saves the registry administrator key. Existing configured contracts
 are reused. See [Stellar setup](docs/stellar-testnet.md).
 
+## Hosted demo
+
+Live at **https://mandate.fly.dev**. One always-on Fly.io machine runs the
+dashboard, the API, the facilitator and the demo stores
+(`https://mandate.fly.dev:4021`, the `STORES_URL` agents receive). The
+database lives on the `mandate_data` volume at `/data/agent-keys.sqlite`.
+Settings that differ from local dev are in [fly.toml](fly.toml). Everything
+else in `.env` is stored with `fly secrets`.
+
+```bash
+fly deploy --ha=false
+```
+
+To replace the hosted database with a local one, copy it to
+`/data/import.sqlite` and restart. [scripts/fly-start.sh](scripts/fly-start.sh)
+moves it into place before anything opens it.
+
+```bash
+sqlite3 apps/receipts/agent-keys.sqlite ".backup import.sqlite"
+```
+
+```bash
+echo "put import.sqlite /data/import.sqlite" | fly ssh sftp shell
+```
+
+```bash
+fly apps restart mandate
+```
+
 ## Accounts and funding
 
 Create an account with your name, email and password. Your main account starts with zero USD balance and is ready to fund after signup. If network setup is interrupted, sign in again to resume the same wallet pair.

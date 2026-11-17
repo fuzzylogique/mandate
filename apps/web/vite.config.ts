@@ -2,8 +2,8 @@ import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
 const proxy = { "/api": "http://127.0.0.1:4022" };
-// Lets judges open the dashboard through a Cloudflare quick tunnel to vite preview.
-const allowedHosts = [".trycloudflare.com"];
+// The public hosts vite preview answers: a Cloudflare quick tunnel, or the Fly.io deployment.
+const allowedHosts = [".trycloudflare.com", ".fly.dev"];
 
 export default defineConfig({
   plugins: [react()],
