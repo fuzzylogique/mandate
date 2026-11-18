@@ -1854,3 +1854,43 @@ test("the chain reader leaves payments the service recorded itself alone, and it
     assert.deepEqual(receipts.map(entry => entry.reference), ["Labels"]);
   } finally { service.close(); }
 });
+
+test("the chain reader parses payment events exactly as Stellar testnet's RPC returns them", async t => {
+  // A recording, not a hand-written fixture: the fake chain above shares this code's assumptions, the real RPC does not.
+  const recorded = JSON.parse(readFileSync(new URL("./fixtures/testnet-payment-events.json", import.meta.url), "utf8")) as { policy: string; getHealth: { latestLedger: number; oldestLedger: number }; getEvents: { events: Record<string, unknown>[]; cursor: string } };
+  let answer: Record<string, unknown> = recorded;
+  const requests: { method: string; params?: { startLedger?: number; pagination?: { cursor?: string; limit?: number }; filters?: { contractIds?: string[] }[] } }[] = [];
+  t.mock.method(globalThis, "fetch", async (_url: unknown, init?: { body?: unknown }) => {
+    const request = JSON.parse(String(init?.body)) as { id: number; method: string; params?: object };
+    requests.push(request);
+    return new Response(JSON.stringify({ jsonrpc: "2.0", id: request.id, result: answer[request.method] }), { headers: { "content-type": "application/json" } });
+  });
+  const gateway = new StellarGateway(":memory:", stellarConfig({ PAYMENTS_ENCRYPTION_KEY: "ab".repeat(32), PAYMENTS_RPC_URL: "https://rpc.example", PAYMENTS_VERIFIED_SMART_POLICY_ID: recorded.policy }));
+  try {
+    assert.ok(recorded.getEvents.events.length > 0 && recorded.getEvents.events.every(event => !("inSuccessfulContractCall" in event)), "the recording is from an RPC that no longer sends the success flag");
+    const account = "CAJZQP2GAWMOWBF65MAVZ6VTY65QKENH6MUOISXA6QI3IGFKU6ZAZQ6S"; const seller = "CCS3FRLJ7CX75NJWVNVVZ2TN6CPJTRCTMCD5SEQGP2KXGROFY6M5M5R2"; const token = "CAF5YGTPPQFX3EYSEYTBI46CASCALCNPGQK3HYFQSPCBZVQKETQCMTJQ";
+    const first = await gateway.paymentEvents();
+    assert.deepEqual(first.events, [
+      { txHash: "10532a2f934551836d42a2be16edf9c148fcd9cceb1d8dc3b2cecac199c09d4c", account, seller, ruleId: 3, token, amount: 10_000_000n, closedAt: "2026-11-18T17:00:39Z" },
+      { txHash: "3ead1926357a75b15cbf0278b137598f95db8f5b9f092749b0af7a523e29fb67", account, seller, ruleId: 3, token, amount: 120_000_000n, closedAt: "2026-11-18T17:00:44Z" },
+    ]);
+    assert.equal(first.cursor, recorded.getEvents.cursor);
+    assert.equal(first.more, false);
+    // With no cursor it asks where the RPC's history starts, then reads about a day back from this contract only.
+    assert.deepEqual(requests.map(request => request.method), ["getHealth", "getEvents"]);
+    assert.equal(requests[1]!.params!.startLedger, Math.max(recorded.getHealth.oldestLedger, recorded.getHealth.latestLedger - 17_280));
+    assert.deepEqual(requests[1]!.params!.filters![0]!.contractIds, [recorded.policy]);
+    // With a cursor it continues from there.
+    requests.length = 0;
+    await gateway.paymentEvents(first.cursor);
+    assert.deepEqual(requests.map(request => [request.method, request.params?.pagination?.cursor, request.params?.startLedger]), [["getEvents", first.cursor, undefined]]);
+
+    // An older RPC that still sends the flag: an event from a failed call is skipped, the rest are kept.
+    const [failed, succeeded] = recorded.getEvents.events;
+    answer = { ...recorded, getEvents: { ...recorded.getEvents, events: [{ ...failed, inSuccessfulContractCall: false }, { ...succeeded, inSuccessfulContractCall: true }] } };
+    assert.deepEqual((await gateway.paymentEvents()).events.map(event => event.amount), [120_000_000n]);
+    // Events in another shape from the same contract are ignored, not fatal.
+    answer = { ...recorded, getEvents: { ...recorded.getEvents, events: [{ ...failed, topic: (failed!.topic as string[]).slice(0, 2) }, { ...succeeded, value: (failed!.topic as string[])[0] }] } };
+    assert.deepEqual((await gateway.paymentEvents()).events, []);
+  } finally { gateway.close(); }
+});
