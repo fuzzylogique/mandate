@@ -156,6 +156,7 @@ class TestChain implements ChainGateway {
     const ruleId = this.nextRule++; this.rules.set(ruleId, { ...(input.agentKey ? { agentKey: input.agentKey } : {}), ...(input.sellers ? { sellers: input.sellers } : {}), accountId: _account.id, currency: input.currency ?? "XLM", limit: input.limit, spent: 0n, revoked: false, expiresAt: input.expiresAt, periodMs: { day: 86400_000, week: 7 * 86400_000, month: 30 * 86400_000 }[input.period], history: [] }); return { ...this.receipt(), ruleId };
   }
   async revokeMandate(_id: string, _treasury: ChainWallet, _account: ChainWallet, ruleId: number) { if (this.fail) throw new Error("Network unavailable"); assert.equal(_treasury.id, this.owners.get(_account.id)); this.rules.get(ruleId)!.revoked = true; return this.receipt(); }
+  async setMandateLimit(_id: string, _treasury: ChainWallet, _account: ChainWallet, ruleId: number, limit: bigint) { if (this.fail) throw new Error("Network unavailable"); assert.equal(_treasury.id, this.owners.get(_account.id)); this.rules.get(ruleId)!.limit = limit; return this.receipt(); }
   async spent(_account: ChainWallet, ruleId: number) { const rule = this.rules.get(ruleId)!; return rule.history.filter(entry => entry.time > Date.now() - rule.periodMs).reduce((sum, entry) => sum + entry.amount, 0n); }
 }
 async function fixture(path = ":memory:", stripe?: FiatGateway) {
@@ -1662,3 +1663,137 @@ test("signed agent routes work over HTTP and reject a tampered body", async () =
     assert.equal(unsigned.status, 401);
   } finally { server.close(); service.close(); }
 });
+
+test("a purchasing workflow drafts a mandate that goes on chain only when its agent connects with its own key", async () => {
+  const { service, owner, chain } = await fixture();
+  try {
+    const vendor = await sellerAccount(service);
+    const expiresAt = new Date(Date.now() + 30 * 86400_000).toISOString();
+    const input = { name: "Software renewals", category: "Software", limit: "300", period: "month", expiresAt, sellerIds: [vendor.sellerId], requestId: "renewals" };
+    await assert.rejects(service.createWorkflow(owner, { ...input, sellerIds: [999_999], requestId: "unknown" }), { status: 400 });
+    const rulesBefore = chain.rules.size;
+    const waiting = await service.createWorkflow(owner, input);
+    assert.equal(waiting.name, "Software renewals agent");
+    assert.equal(waiting.status, "waiting");
+    assert.deepEqual(waiting.pending, [{ name: "Software renewals", limit: "300", period: "month", expiresAt, sellerIds: [vendor.sellerId], category: "Software" }]);
+    assert.equal(chain.rules.size, rulesBefore, "nothing goes on chain before the agent connects");
+    // Retrying the request neither adds a second agent nor a second draft.
+    assert.equal((await service.createWorkflow(owner, input)).id, waiting.id);
+    const before = await service.workspace(owner);
+    assert.equal(before.agents.filter(agent => agent.name === "Software renewals agent").length, 1);
+    assert.equal(before.agents.find(agent => agent.id === waiting.id)!.pending!.length, 1);
+    assert.equal(JSON.stringify(before).includes("workflow:renewals"), false, "request IDs stay private");
+
+    const key = Keypair.random();
+    await service.connectAgent({ code: waiting.pairing!.code }, key.publicKey());
+    const after = await service.workspace(owner);
+    const mandate = after.mandates.find(saved => saved.name === "Software renewals")!;
+    assert.equal(mandate.agentId, waiting.id);
+    assert.equal(mandate.category, "Software");
+    assert.equal(mandate.limit, "300");
+    assert.equal(chain.rules.get(mandate.ruleId!)!.agentKey, key.publicKey(), "the agent's own key is the rule's only signer");
+    assert.deepEqual(chain.rules.get(mandate.ruleId!)!.sellers, [vendor.address]);
+    assert.equal(after.agents.find(agent => agent.id === waiting.id)!.pending, undefined);
+    await service.workspace(owner);
+    assert.equal((await service.workspace(owner)).mandates.filter(saved => saved.name === "Software renewals").length, 1);
+  } finally { service.close(); }
+});
+
+test("a workflow mandate that fails to reach the chain when the agent connects is granted on the next workspace load", async t => {
+  const { service, owner, chain } = await fixture();
+  try {
+    const waiting = await service.createWorkflow(owner, { name: "Office supplies", category: "Office supplies", limit: "150", period: "week", expiresAt: new Date(Date.now() + 86400_000).toISOString(), sellerIds: [], requestId: "supplies" });
+    const failing = t.mock.method(chain, "addMandate", async () => { throw new Error("Rule registration unavailable"); });
+    await service.connectAgent({ code: waiting.pairing!.code }, Keypair.random().publicKey());
+    assert.equal(service.agentConnection((await connectedRecord(service, waiting.id))).agentId, waiting.id, "the agent is connected even though its mandate is not on chain yet");
+    failing.mock.restore();
+    const workspace = await service.workspace(owner);
+    assert.equal(workspace.mandates.filter(saved => saved.name === "Office supplies" && saved.status === "active").length, 1);
+    assert.equal(workspace.agents.find(agent => agent.id === waiting.id)!.pending, undefined);
+  } finally { service.close(); }
+});
+
+test("only the owner can change a mandate's limit, and the new limit is the one enforced", async () => {
+  const { service, owner, chain } = await fixture();
+  try {
+    const { agent } = await connectedAgent(service, owner);
+    const { mandate } = await service.grantMandate(owner, agentMandate(agent.id));
+    const seller = await sellerAccount(service);
+    const account = (await service.workspace(owner)).accounts[0]!;
+    await service.fund(owner, account.id, { amount: "50", requestId: "fund" });
+    const pay = (amount: string, requestId: string) => service.prepareAgentPayment(agent, { mandate: mandate.reference, seller: seller.address, amount, reference: "Seats", requestId });
+    await assert.rejects(pay("8", "before"), { status: 403, message: /spending limit/ });
+    const stranger = service.authenticate((await service.register({ name: "Stranger", email: "stranger@example.com", password: "a long stranger password" })).token);
+    await assert.rejects(service.updateMandate(stranger, mandate.reference, { limit: "500", requestId: "steal" }), { status: 404 });
+    await assert.rejects(service.updateMandate(owner, mandate.reference, { limit: "0", requestId: "zero" }), { status: 400 });
+    const raised = await service.updateMandate(owner, mandate.reference, { limit: "20", category: "Software", requestId: "raise" });
+    assert.equal(raised.limit, "20");
+    assert.equal(raised.category, "Software");
+    assert.equal(chain.rules.get(mandate.ruleId!)!.limit, 200_000_000n);
+    assert.equal((await pay("8", "after")).summary.amount, "8");
+    const lowered = await service.updateMandate(owner, mandate.reference, { limit: "1", requestId: "lower" });
+    assert.equal(lowered.limit, "1");
+    await assert.rejects(pay("2", "lowered"), { status: 403, message: /spending limit/ });
+    assert.equal((await service.updateMandate(owner, mandate.reference, { category: null })).category, undefined);
+    await service.revoke(owner, mandate.reference);
+    await assert.rejects(service.updateMandate(owner, mandate.reference, { limit: "30", requestId: "revoked" }), { status: 409 });
+  } finally { service.close(); }
+});
+
+test("refused agent payments are kept for the owner, with the reason worked out by the service", async () => {
+  const { service, owner } = await fixture();
+  try {
+    const { agent } = await connectedAgent(service, owner);
+    const allowed = await sellerAccount(service);
+    const { mandate } = await service.grantMandate(owner, agentMandate(agent.id, { sellerIds: [allowed.sellerId] }));
+    const account = (await service.workspace(owner)).accounts[0]!;
+    await service.fund(owner, account.id, { amount: "10", requestId: "fund" });
+    await assert.rejects(service.prepareAgentPayment(agent, { mandate: mandate.reference, seller: allowed.address, amount: "6", reference: "Too much", requestId: "too-much" }), { status: 403 });
+    const lookalike = StrKey.encodeContract(randomBytes(32));
+    // An x402 refusal happens on the agent's side; it reports the attempt and the service finds the reason.
+    const reported = await service.reportDecline(agent, { mandate: mandate.reference, seller: lookalike, amount: "1.2", reference: "Cheapest offer", url: "https://paperline-suply.example/toner" });
+    assert.match(reported.reason, /not a verified/);
+    assert.equal(reported.reference, "Cheapest offer · x402 paperline-suply.example");
+    await assert.rejects(service.reportDecline(agent, { mandate: mandate.reference, seller: "nowhere", amount: "1", reference: "Bad address" }), { status: 400 });
+    const { declines, activity } = await service.workspace(owner);
+    assert.deepEqual(declines.map(decline => [decline.reference, decline.amount, decline.agentId, decline.mandateReference]), [
+      ["Cheapest offer · x402 paperline-suply.example", "1.2", agent.id, mandate.reference],
+      ["Too much", "6", agent.id, mandate.reference],
+    ]);
+    assert.match(declines[1]!.reason, /spending limit/);
+    assert.equal(activity.filter(entry => entry.kind === "payment").length, 0, "nothing was paid");
+    assert.equal(JSON.stringify(declines).includes("ownerId"), false);
+    // Another owner never sees them.
+    const other = service.authenticate((await service.register({ name: "Other", email: "other@example.com", password: "another long password" })).token);
+    assert.deepEqual((await service.workspace(other)).declines, []);
+  } finally { service.close(); }
+});
+
+test("a workspace carries its company and team, and lists only accounts that chose to be vendors", async () => {
+  const chain = new TestChain(); const service = new StellarPaymentService(":memory:", chain);
+  try {
+    const registered = await service.register({ name: "Dana Okafor", email: "dana@example.com", password: "long owner password", company: "Larkfield Logistics", team: "Operations" });
+    const owner = service.authenticate(registered.token);
+    assert.equal(registered.customer.company, "Larkfield Logistics");
+    const unlisted = await sellerAccount(service);
+    const listedToken = (await service.register({ name: "Seatwise", email: "seatwise@example.com", password: "a secure vendor password" })).token;
+    const vendor = service.authenticate(listedToken);
+    const vendorAccount = (await service.workspace(vendor)).accounts[0]!;
+    await assert.rejects(async () => service.updateProfile(vendor, { vendor: { name: "Seatwise" } }), { status: 400 });
+    service.updateProfile(vendor, { vendor: { name: "Seatwise", category: "Software" } });
+    const workspace = await service.workspace(owner);
+    assert.deepEqual(workspace.customer, { id: workspace.customer.id, name: "Dana Okafor", email: "dana@example.com", company: "Larkfield Logistics", team: "Operations" });
+    assert.deepEqual(workspace.vendors, [{ sellerId: vendorAccount.sellerId, name: "Seatwise", category: "Software", address: vendorAccount.address }]);
+    assert.equal(workspace.vendors.some(saved => saved.sellerId === unlisted.sellerId), false);
+    assert.deepEqual((await service.workspace(vendor)).vendors, [], "a vendor does not list itself");
+    assert.equal(service.updateProfile(owner, { team: "" }).team, undefined);
+    assert.equal(service.updateProfile(owner, { team: "Finance" }).company, "Larkfield Logistics", "fields that were not sent stay");
+    service.updateProfile(vendor, { vendor: null });
+    assert.deepEqual((await service.workspace(owner)).vendors, []);
+  } finally { service.close(); }
+});
+
+async function connectedRecord(service: StellarPaymentService, id: string) {
+  const state = (service as unknown as { core: WorkspaceStore }).core.read();
+  return state.agents!.find(agent => agent.id === id)!;
+}

@@ -29,7 +29,7 @@ export function createMandateTools(agent = new MandateAgent()) {
     }),
     tool(async ({ query }) => describeProducts(await agent.products(query), query), {
       name: "find_products",
-      description: "Search the x402 stores; cheapest first, with whether each store is a verified seller.",
+      description: "Search the vendors that sell over x402; cheapest first, with whether each vendor is a verified seller.",
       schema: z.object({ query: z.string() }),
     }),
     tool(async ({ url, reason, mandate }) => describePayment(await agent.buy(url, { reference: reason, ...(mandate ? { mandate } : {}) })), {

@@ -56,6 +56,8 @@ export interface ChainGateway {
   /** `agentKey`: the connected agent's own public key becomes the rule's only signer. `sellers`: the only seller addresses the rule can pay, enforced on chain. */
   addMandate(id: string, treasury: ChainWallet, account: ChainWallet, input: { name: string; limit: bigint; period: SpendingPeriod; expiresAt: string; currency?: string; agentKey?: string; sellers?: string[] }): Promise<{ ruleId: number } & ChainReceipt>;
   revokeMandate(id: string, treasury: ChainWallet, account: ChainWallet, ruleId: number): Promise<ChainReceipt>;
+  /** Rewrites the mandate's limit in the spending-limit policy. Authorized by the owner's rule, never the agent's. */
+  setMandateLimit(id: string, treasury: ChainWallet, account: ChainWallet, ruleId: number, limit: bigint): Promise<ChainReceipt>;
   spent(account: ChainWallet, ruleId: number): Promise<bigint>;
   isVerifiedSmartAccount(address: string): Promise<boolean>;
   verifySmartAccount(id: string, account: ChainWallet, treasury: ChainWallet, currency?: string): Promise<ChainReceipt>;
@@ -366,12 +368,16 @@ export class StellarGateway implements ChainGateway {
     return { id, address, rail: "blockchain", ...receipt };
   }
   private async readContract<T>(contract: string, method: string, args: xdr.ScVal[]): Promise<T> {
+    return scValToNative(await this.simulateRead(contract, method, args)) as T;
+  }
+  /** A read-only call, as the raw value the contract returned. */
+  private async simulateRead(contract: string, method: string, args: xdr.ScVal[]): Promise<xdr.ScVal> {
     const source = Keypair.random();
     const tx = new TransactionBuilder(new Account(source.publicKey(), "0"), { fee: "100", networkPassphrase: Networks.TESTNET })
       .addOperation(Operation.invokeContractFunction({ contract, function: method, args })).setTimeout(30).build();
     const simulation = await this.server.simulateTransaction(tx);
     requireThat(!rpc.Api.isSimulationError(simulation) && simulation.result, 503, `Could not read ${method} from the contract`);
-    return scValToNative(simulation.result.retval) as T;
+    return simulation.result.retval;
   }
   async isVerifiedSmartAccount(address: string): Promise<boolean> {
     if (!StrKey.isValidContract(address) || !this.config.sellerRegistry) return false;
@@ -572,6 +578,16 @@ export class StellarGateway implements ChainGateway {
   revokeMandate(id: string, treasury: ChainWallet, account: ChainWallet, ruleId: number): Promise<ChainReceipt> {
     const payer = this.keypair(treasury.id);
     return this.execute(`revoke:${id}`, () => this.contract(payer, Operation.invokeContractFunction({ contract: account.address, function: "remove_context_rule", args: [xdr.ScVal.scvU32(ruleId)] }), { wallet: account, signer: payer, ruleId: 0 }));
+  }
+  async setMandateLimit(id: string, treasury: ChainWallet, account: ChainWallet, ruleId: number, limit: bigint): Promise<ChainReceipt> {
+    requireThat(this.config.spendingLimitPolicy, 503, "Configure the spending-limit policy before changing mandates");
+    const payer = this.keypair(treasury.id);
+    // The policy takes the rule exactly as the account stores it.
+    const rule = await this.simulateRead(account.address, "get_context_rule", [xdr.ScVal.scvU32(ruleId)]);
+    return this.execute(`limit:${id}`, () => this.contract(payer, Operation.invokeContractFunction({
+      contract: this.config.spendingLimitPolicy!, function: "set_spending_limit",
+      args: [nativeToScVal(limit, { type: "i128" }), rule, Address.fromString(account.address).toScVal()],
+    }), { wallet: account, signer: payer, ruleId: 0 }));
   }
   async spent(account: ChainWallet, ruleId: number): Promise<bigint> {
     // A read-only simulation uses a synthetic source; no fees or signature are needed.

@@ -18,6 +18,47 @@ export interface Customer {
   id: string;
   name: string;
   email: string;
+  /** The company this workspace buys for, like "Larkfield Logistics". */
+  company?: string;
+  /** The team inside the company, like "Operations". */
+  team?: string;
+}
+
+/** What a purchasing workflow buys. Kept with the mandate for spending reports. */
+export const WORKFLOW_CATEGORIES = ["Software", "Cloud and APIs", "Office supplies", "Other"] as const;
+
+/** A verified seller that chose to be listed, so teams can pick it by name. */
+export interface Vendor {
+  sellerId: number;
+  name: string;
+  category: string;
+  /** The vendor's smart account (C-address). Mandates pay this address. */
+  address: string;
+}
+
+/** A mandate drafted for an agent that has not connected yet. It goes on chain when the agent connects. */
+export interface PendingMandate {
+  name: string;
+  limit: string;
+  period: SpendingPeriod;
+  expiresAt: string;
+  sellerIds?: number[];
+  category?: string;
+}
+
+/** A payment an agent tried that the account's rules refused. Nothing was paid. */
+export interface PaymentDecline {
+  id: string;
+  accountId: string;
+  agentId: string;
+  mandateReference: string | null;
+  /** Where the agent tried to pay, when known. */
+  destination?: string;
+  amount?: string;
+  currency: PaymentCurrency;
+  reason: string;
+  reference: string;
+  createdAt: string;
 }
 
 export interface AccountAgent {
@@ -41,6 +82,8 @@ export interface AccountAgent {
   publicKey?: string;
   /** While waiting: the one-time code the agent connects with. */
   pairing?: { code: string; expiresAt: string };
+  /** Mandates that will be granted as soon as the agent connects. */
+  pending?: PendingMandate[];
 }
 
 export interface SpendingAccount {
@@ -84,6 +127,8 @@ export interface AccountMandate {
   verifiedRecipientsOnly?: boolean;
   /** Empty or absent permits any verified seller. Checked at payment time. */
   sellerIds?: number[];
+  /** What this mandate buys, for spending reports. Not on chain. */
+  category?: string;
   /**
    * Set when the mandate is granted to a connected agent: the on-chain rule's
    * only signer is that agent's own key, so only it can spend under the mandate.
@@ -121,6 +166,10 @@ export interface PaymentWorkspace {
   mandates: AccountMandate[];
   shared: { account: SpendingAccount; mandate: AccountMandate; ownerName: string }[];
   activity: PaymentEntry[];
+  /** Payments the account's rules refused, newest first. */
+  declines: PaymentDecline[];
+  /** Listed vendors, to choose approved sellers by name. */
+  vendors: Vendor[];
 }
 
 export interface OpenAccountInput {
@@ -179,7 +228,19 @@ export interface CreateAccountMandateInput {
   sellerIds?: number[];
   /** Grant the mandate to this connected agent; its own key becomes the rule's signer. */
   agentId?: string;
+  category?: string;
   requestId?: string;
+}
+
+/** A purchasing workflow: a new agent with its own key, plus the mandate it gets when it connects. */
+export interface CreateWorkflowInput {
+  name: string;
+  category: string;
+  limit: string;
+  period: SpendingPeriod;
+  expiresAt: string;
+  sellerIds: number[];
+  requestId: string;
 }
 
 export interface PaymentNetwork {

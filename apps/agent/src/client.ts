@@ -11,14 +11,17 @@ import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "n
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { Address, Keypair, scValToNative, xdr } from "@stellar/stellar-sdk";
+import { decodePaymentRequiredHeader } from "@x402/core/http";
 import {
   AGENT_HEADERS,
   agentSigningPayload,
+  formatAmount,
   toBaseUnits,
   type AgentConnection,
   type AgentMandate,
   type AgentPaymentOutcome,
   type AgentSellerCheck,
+  type PaymentDecline,
   type PaymentEntry,
   type PreparedAgentPayment,
 } from "@mandate/shared";
@@ -171,7 +174,21 @@ export class MandateAgent {
     }
   }
 
-  /** Every product the demo stores sell, labelled with whether the seller is verified. */
+  /** What a store asks for a product: who gets paid and how much, read from its unpaid 402 answer. */
+  private async quote(url: string, asset: string): Promise<{ seller: string; amount: string } | undefined> {
+    try {
+      const response = await fetch(url, { redirect: "error" });
+      if (response.status !== 402) return undefined;
+      const header = response.headers.get("PAYMENT-REQUIRED");
+      const required = header ? decodePaymentRequiredHeader(header) : (await response.json()) as { accepts?: { asset: string; amount: string; payTo: string }[] };
+      const offer = required.accepts?.find((entry) => entry.asset === asset) ?? required.accepts?.[0];
+      return offer ? { seller: offer.payTo, amount: formatAmount(offer.amount) } : undefined;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** Every product the demo vendors sell, labelled with whether the seller is verified. */
   async products(query = ""): Promise<StoreItem[]> {
     const { storesUrl } = await this.me();
     if (!storesUrl) throw new Error("No x402 stores are configured for this Mandate.");
@@ -207,7 +224,16 @@ export class MandateAgent {
       response = await payingFetch(url);
     } catch (cause) {
       // The account refused to authorize it, or the store could not be reached.
-      return { status: "declined", reason: cause instanceof Error ? cause.message.split("\n")[0]! : String(cause) };
+      const reason = cause instanceof Error ? cause.message.split("\n")[0]! : String(cause);
+      // Tell the owner what was tried. Mandate works out the reason itself from the seller and amount.
+      const quote = await this.quote(url, connection.asset);
+      if (quote) {
+        try {
+          const recorded = await this.call<PaymentDecline>("POST", "/api/agent/declines", { mandate: mandate.reference, seller: quote.seller, amount: quote.amount, reference: options.reference ?? new URL(url).pathname.slice(1), url });
+          return { status: "declined", reason: recorded.reason };
+        } catch { /* the report is a courtesy: the payment is refused either way */ }
+      }
+      return { status: "declined", reason };
     }
     const txHash = response.ok ? settlementTxHash(response) : undefined;
     if (!txHash) return { status: "declined", reason: `The store answered ${response.status} and nothing was paid` };

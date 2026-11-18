@@ -6,7 +6,7 @@ const mandateId = "mnd_browser_test_secret_0123456789abcdefghijklmnop";
 const mandate: AccountMandate = { reference: "owner-record-reference", accountId: "bank", name: "Purchasing", recipientType: "agent", recipient: "Purchaser", limit: "10", spent: "0", period: "day", expiresAt: "2099-12-31T23:59:59Z", status: "active", createdAt: "2026-11-14T12:00:00Z", currency: "USD", enforcement: "on-chain", ruleId: 2, verifiedRecipientsOnly: true };
 const account: SpendingAccount = { id: "bank", ownerId: "owner", name: "Operations", rail: "traditional", type: "traditional", currency: "USD", balance: "100", address: "C_DEMO_SOURCE", verified: true, createdAt: "2026-11-14T12:00:00Z" };
 const network: PaymentNetwork = { id: "stellar:testnet", name: "Stellar testnet", currency: "XLM", rpcUrl: "https://rpc.example", horizonUrl: "https://horizon.example", explorerUrl: "https://explorer.example", tokenContract: "C_TEST_TOKEN", smartAccounts: true, verifiedSmartAccounts: true, mandates: true, agentVerification: true, faucet: true };
-const workspace: PaymentWorkspace = { mode: "stellar-testnet", network, customer: { id: "owner", name: "Owner", email: "owner@example.com" }, accounts: [account], agents: [], mandates: [mandate], shared: [], activity: [] };
+const workspace: PaymentWorkspace = { mode: "stellar-testnet", network, customer: { id: "owner", name: "Owner", email: "owner@example.com" }, accounts: [account], agents: [], mandates: [mandate], shared: [], activity: [], declines: [], vendors: [] };
 
 async function mockClipboard(page: Page, fail = false) {
   await page.addInitScript(({ fail }) => {
@@ -315,7 +315,7 @@ for (const type of ["traditional", "stellar"] as const) {
     await expect(addressField).not.toHaveValue(account.address!);
     await page.getByRole("button", { name: "Show Smart Account address", exact: true }).click();
     await expect(page.getByRole("button", { name: /Second USD account/ })).toHaveCount(0);
-    await page.getByRole("link", { name: "Activity", exact: true }).click();
+    await page.getByRole("link", { name: "Spending", exact: true }).click();
     await expect(addressField).toHaveAttribute("type", "password");
     await expect(addressField).not.toHaveValue(account.address!);
     await page.getByRole("button", { name: "Copy Smart Account address", exact: true }).click();
@@ -364,13 +364,13 @@ test("signup leads directly to one main account with mandates and activity", asy
   const summary = page.getByRole("region", { name: "Main account", exact: true });
   await expect(summary).toContainText("100 USD");
   await expect(summary.getByRole("button", { name: "Add funds", exact: true })).toBeVisible();
-  await expect(page.getByRole("navigation", { name: "Workspace" }).getByRole("link")).toHaveText(["Agents 0", "Mandates 1", "Activity"]);
-  await expect(page.getByRole("heading", { name: "Mandates", exact: true })).toBeVisible();
+  await expect(page.getByRole("navigation", { name: "Workspace" }).getByRole("link")).toHaveText(["Workflows 0", "Agents 0", "Mandates 1", "Spending"]);
+  await expect(page.getByRole("heading", { name: "Purchasing workflows", exact: true })).toBeVisible();
   await expect(page.getByLabel("Source account", { exact: true })).toHaveCount(0);
   await expect(page.getByRole("link", { name: /Open account|Accounts/ })).toHaveCount(0);
   expect(openingRequests).toBe(0);
-  await page.getByRole("link", { name: "Activity", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "Activity", exact: true })).toBeVisible();
+  await page.getByRole("link", { name: "Spending", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Spending", exact: true })).toBeVisible();
   await expect(summary).toBeVisible();
 });
 
@@ -379,7 +379,7 @@ for (const path of ["/accounts", "/accounts/new"]) {
     await mockWorkspace(page);
     await page.goto(path);
     await expect(page.getByRole("region", { name: "Main account", exact: true })).toBeVisible();
-    await expect(page.getByRole("heading", { name: "Mandates", exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "Purchasing workflows", exact: true })).toBeVisible();
     await expect(page.getByLabel("Account name", { exact: true })).toHaveCount(0);
     await expect(page.getByRole("button", { name: "Open account", exact: true })).toHaveCount(0);
   });
@@ -470,11 +470,14 @@ test("Agents lists account identities and registers new agents without spending 
   });
   await page.goto("/agents");
   await expect(page.getByRole("region", { name: "Main account", exact: true })).toBeVisible();
-  await expect(page.getByText("No agents yet. Add one to connect an assistant like Claude.")).toBeVisible();
+  await expect(page.getByText("No agents yet. Set up a purchasing workflow, or add an agent to connect an assistant like Claude.")).toBeVisible();
   await page.getByRole("button", { name: "Add agent", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Add agent", exact: true });
   await expect(dialog.getByLabel(/Spending limit|Expires|Rolling window/)).toHaveCount(0);
   await dialog.getByLabel("Agent name", { exact: true }).fill("Travel booker");
+  // An agent's own key is the default; sharing a mandate ID is one of the other ways.
+  await expect(dialog.getByRole("radio", { name: /With a mandate ID/ })).toBeHidden();
+  await dialog.getByText("Other ways to connect", { exact: true }).click();
   await dialog.getByRole("radio", { name: /With a mandate ID/ }).check();
   await dialog.getByRole("button", { name: "Add agent", exact: true }).click();
   await expect(dialog).toHaveCount(0);
@@ -518,7 +521,7 @@ test("an agent with its own key connects with a one-time code and its mandate ha
   await page.getByRole("button", { name: "Add agent", exact: true }).click();
   const dialog = page.getByRole("dialog", { name: "Add agent", exact: true });
   await dialog.getByLabel("Agent name", { exact: true }).fill("Claude");
-  await expect(dialog.getByRole("radio", { name: /With its own key/ })).toBeChecked();
+  await expect(dialog.getByText(/The agent makes its own key and connects with a one-time code/)).toBeVisible();
   await dialog.getByRole("button", { name: "Add agent", exact: true }).click();
   const connect = page.getByRole("dialog", { name: "Connect Claude", exact: true });
   await connect.getByRole("button", { name: "Connection code K7Q4-92XD, copy", exact: true }).click();

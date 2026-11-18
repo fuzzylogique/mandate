@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomInt } from "node:crypto";
 import { Keypair, StrKey } from "@stellar/stellar-sdk";
 import { agentSigningPayload, formatAmount, NETWORK, toBaseUnits } from "@mandate/shared";
 import type { AgentConnection, AgentMandate, AgentPaymentOutcome, AgentSellerCheck, PreparedAgentPayment } from "@mandate/shared";
-import type { AccountAgent, AccountMandate, AccountOpening, FiatCheckout, FiatFundingStatus, FundingMethod, MandateCreation, MandatePaymentPreview, PaymentEntry, PaymentWorkspace, SpendingAccount } from "@mandate/shared";
+import type { AccountAgent, AccountMandate, AccountOpening, Customer, FiatCheckout, FiatFundingStatus, FundingMethod, MandateCreation, MandatePaymentPreview, PaymentDecline, PaymentEntry, PaymentWorkspace, SpendingAccount } from "@mandate/shared";
 import { WorkspaceStore, ServiceError, amount, requireThat, text, validateMandateInput, type Actor, type EntryRecord, type MandateRecord, type StellarAccountPair, type AgentRecord, publicEntry } from "./store.ts";
 import type { ChainGateway, ChainReceipt } from "./stellar.ts";
 import { fundingAmount } from "./funding.ts";
@@ -29,6 +29,7 @@ export class StellarPaymentService {
   private core: WorkspaceStore;
   private chain: ChainGateway;
   private chatSetups = new Map<string, Promise<ChatSetup>>();
+  private pendingGrants = new Map<string, Promise<void>>();
   private stripe: FiatGateway;
   constructor(path: string, chain: ChainGateway, stripe: FiatGateway = new StripeSandbox()) {
     this.core = new WorkspaceStore(path);
@@ -55,6 +56,7 @@ export class StellarPaymentService {
   }
   authenticate(token: string) { return this.core.authenticate(token); }
   logout(token: string) { return this.core.logout(token); }
+  updateProfile(actor: Actor, body: Record<string, unknown>): Customer { return this.core.updateProfile(actor, body); }
   private customer(actor: Actor) {
     const found = actor.kind === "customer" && this.core.read().customers.find(c => c.id === actor.id);
     requireThat(found, 403, "Sign in to manage your financial accounts");
@@ -110,6 +112,8 @@ export class StellarPaymentService {
     if (!state.agents?.some(agent => agent.id === chatAgentId) || !state.mandates.some(mandate => mandate.id === chatMandateId)) {
       await this.defaultChatSetup(actor);
     }
+    // A workflow's mandate that could not be granted when its agent connected is retried here.
+    for (const agent of state.agents?.filter(agent => agent.status === "connected" && agent.pendingMandates?.length && initial.accounts.some(account => account.id === agent.accountId)) ?? []) await this.grantPending(agent.id);
     const view = this.core.workspace(actor);
     const accounts = new Map<string, SpendingAccount>();
     for (const account of [...view.accounts, ...view.shared.map(s => s.account)]) accounts.set(account.id, account);
@@ -159,6 +163,53 @@ export class StellarPaymentService {
       this.core.update(state => { const agents = state.agents ??= []; if (!agents.some(saved => saved.id === id)) agents.push(agent); });
       return agent;
     });
+  }
+  /**
+   * A purchasing workflow: an agent that will hold its own key, and the mandate
+   * it gets the moment it connects. Nothing goes on chain until then, because
+   * the mandate's only signer is the key the agent makes for itself.
+   */
+  async createWorkflow(actor: Actor, body: Record<string, unknown>): Promise<AccountAgent> {
+    const account = await this.mainAccount(actor);
+    const name = text(body.name, "Workflow name", 100);
+    const requestId = `workflow:${text(body.requestId, "Idempotency key", 100)}`;
+    const draft = validateMandateInput({ ...body, name, recipientType: "agent", recipient: "agent" });
+    for (const sellerId of draft.sellerIds ?? []) {
+      requireThat(this.core.read().accounts.some(saved => saved.sellerId === sellerId && saved.id !== account.id), 400, `Vendor ${sellerId} does not have a Mandate account yet`);
+    }
+    const agent = await this.createAgent(actor, { name: `${name} agent`, requestId, connect: true });
+    const mandateId = digest(this.commandId(actor, "mandate", requestId)).slice(0, 32);
+    this.core.update(state => {
+      const found = state.agents!.find(saved => saved.id === agent.id)!;
+      if (found.status === "revoked" || state.mandates.some(mandate => mandate.id === mandateId)) return;
+      const pending = found.pendingMandates ??= [];
+      if (!pending.some(saved => saved.requestId === requestId)) pending.push({ requestId, name: draft.name, limit: draft.limit, period: draft.period, expiresAt: draft.expiresAt, ...(draft.sellerIds ? { sellerIds: draft.sellerIds } : {}), ...(draft.category ? { category: draft.category } : {}) });
+    });
+    await this.grantPending(agent.id);
+    return this.agentView(this.agentRecord(agent.id), agent.verified);
+  }
+  /** Grants the mandates drafted for an agent once it is connected. Safe to call again. */
+  private grantPending(agentId: string): Promise<void> {
+    const running = this.pendingGrants.get(agentId);
+    if (running) return running;
+    const work = (async () => {
+      const agent = this.agentRecord(agentId);
+      if (agent.status !== "connected") return;
+      const account = this.core.read().accounts.find(saved => saved.id === agent.accountId)!;
+      for (const { requestId, ...details } of agent.pendingMandates ?? []) {
+        let settled = true;
+        try { await this.grantMandate({ kind: "customer", id: account.ownerId }, { ...details, agentId, requestId }); }
+        // A draft that is no longer valid (it expired while waiting) is dropped; anything else is retried.
+        catch (error) { settled = error instanceof ServiceError && error.status === 400; }
+        if (settled) this.core.update(state => {
+          const found = state.agents!.find(saved => saved.id === agentId)!;
+          found.pendingMandates = found.pendingMandates?.filter(saved => saved.requestId !== requestId);
+          if (!found.pendingMandates?.length) delete found.pendingMandates;
+        });
+      }
+    })().finally(() => this.pendingGrants.delete(agentId));
+    this.pendingGrants.set(agentId, work);
+    return work;
   }
   /** Stable command ID makes signup, login recovery and concurrent chats reuse one identity. */
   async defaultChatAgent(actor: Actor): Promise<AccountAgent> {
@@ -425,6 +476,35 @@ export class StellarPaymentService {
       return { revoked: true };
     });
   }
+  /**
+   * The owner changes a mandate: its limit (rewritten in the spending-limit
+   * policy on Stellar) or its category. Only the signed-in owner can; an agent
+   * has no route to ask for more.
+   */
+  async updateMandate(actor: Actor, id: string, body: Record<string, unknown>): Promise<AccountMandate> {
+    const mandate = this.core.read().mandates.find(m => m.id === id);
+    requireThat(mandate, 404, "Mandate not found");
+    const account = this.owned(actor, mandate.accountId);
+    requireThat(mandate.status === "active" && mandate.expiresAt > timestamp(), 409, "This mandate has expired or been revoked. Create a new one.");
+    if (body.limit !== undefined) {
+      const limit = decimal(amount(body.limit));
+      requireThat(mandate.ruleId !== undefined && mandate.enforcement === "on-chain", 409, "This mandate has no rule on Stellar to change");
+      const commandId = this.commandId(actor, `mandate-limit:${id}`, body.requestId);
+      await this.chain.command(commandId, { id, limit }, async () => {
+        await this.chain.setMandateLimit(commandId, this.classicWallet(account), this.chain.wallet(account.id), mandate.ruleId!, BigInt(toBaseUnits(limit)));
+        this.core.update(state => { state.mandates.find(m => m.id === id)!.limit = limit; });
+        return { limit };
+      });
+    }
+    if ("category" in body) {
+      const category = body.category === null ? undefined : text(body.category, "Category", 40);
+      this.core.update(state => { const saved = state.mandates.find(m => m.id === id)!; if (category) saved.category = category; else delete saved.category; });
+    }
+    const state = this.core.read();
+    const view = this.core.mandateView(state, state.mandates.find(m => m.id === id)!);
+    if (view.status === "active" && view.ruleId !== undefined) view.spent = decimal(await this.chain.spent(this.chain.wallet(view.accountId), view.ruleId));
+    return view;
+  }
   async pay(actor: Actor, body: Record<string, unknown>): Promise<PaymentEntry> {
     const units = amount(body.amount);
     const destination = text(body.destination, "Stellar recipient address", 56);
@@ -531,14 +611,14 @@ export class StellarPaymentService {
   /** Public view: the waiting agent's code comes from the vault, never from the hash. */
   private agentView(agent: AccountAgent | AgentRecord, verified: boolean): AccountAgent {
     const record = this.core.read().agents?.find(saved => saved.id === agent.id) ?? agent as AgentRecord;
-    const { pairingHash: _hash, pairingExpiresAt, pairingVersion, ...view } = record as AgentRecord;
+    const { pairingHash: _hash, pairingExpiresAt, pairingVersion, pendingMandates, ...view } = record as AgentRecord;
     let pairing: AccountAgent["pairing"];
     // A missing code only hides it; the owner can make a new one.
     if (view.status === "waiting" && pairingExpiresAt) {
       try { pairing = { code: this.chain.secret(`pairing:${view.id}:${pairingVersion ?? 1}`, () => { throw new ServiceError(409, "missing"); }), expiresAt: pairingExpiresAt }; }
       catch { pairing = { code: "", expiresAt: new Date(0).toISOString() }; }
     }
-    return { ...view, verified, ...(pairing ? { pairing } : {}) };
+    return { ...view, verified, ...(pairing ? { pairing } : {}), ...(pendingMandates?.length ? { pending: pendingMandates.map(({ requestId: _request, ...draft }) => draft) } : {}) };
   }
   private ownedAgent(actor: Actor, id: string): AgentRecord {
     const agent = this.agentRecord(id);
@@ -567,7 +647,7 @@ export class StellarPaymentService {
     this.core.update(state => {
       const found = state.agents!.find(saved => saved.id === id)!;
       found.status = "revoked"; found.verified = false;
-      delete found.pairingHash; delete found.pairingExpiresAt;
+      delete found.pairingHash; delete found.pairingExpiresAt; delete found.pendingMandates;
     });
     for (const mandate of this.core.read().mandates.filter(m => (m.agentId === id || (m.recipientType === "agent" && m.recipient === id)) && (m.status === "active" || m.chainRevocationPending))) {
       await this.revoke(actor, mandate.id);
@@ -613,6 +693,8 @@ export class StellarPaymentService {
       });
       return { connected: true };
     });
+    // The workflow's mandate goes on chain now that its only signer, the agent's key, exists.
+    await this.grantPending(agent.id);
     return this.agentConnection(this.agentRecord(agent.id));
   }
   agentConnection(agent: AgentRecord): AgentConnection {
@@ -621,7 +703,7 @@ export class StellarPaymentService {
     const owner = state.customers.find(customer => customer.id === account.ownerId);
     requireThat(this.network.agentVerifier, 503, "Run pnpm setup:contracts to configure on-chain agent verification");
     return {
-      agentId: agent.id, name: agent.name, ownerName: owner?.name ?? "", smartAccount: this.chain.wallet(account.id).address,
+      agentId: agent.id, name: agent.name, ownerName: owner?.name ?? "", ...(owner?.company ? { company: owner.company } : {}), smartAccount: this.chain.wallet(account.id).address,
       agentVerifier: this.network.agentVerifier, asset: this.chain.usdToken(), network: NETWORK, rpcUrl: this.network.rpcUrl,
       ...(process.env.STORES_URL ? { storesUrl: process.env.STORES_URL } : {}),
     };
@@ -649,7 +731,7 @@ export class StellarPaymentService {
     const state = this.core.read();
     const account = state.accounts.find(saved => this.chain.wallet(saved.id).address === address);
     const owner = account && state.customers.find(customer => customer.id === account.ownerId);
-    return { address, verified: StrKey.isValidContract(address) && await this.chain.isVerifiedSmartAccount(address), ...(account?.sellerId !== undefined ? { sellerId: account.sellerId } : {}), ...(owner ? { name: owner.name } : {}) };
+    return { address, verified: StrKey.isValidContract(address) && await this.chain.isVerifiedSmartAccount(address), ...(account?.sellerId !== undefined ? { sellerId: account.sellerId } : {}), ...(owner ? { name: owner.vendor?.name ?? owner.company ?? owner.name } : {}) };
   }
   /** Every check the chain will make again; failing one here declines before anything is signed. */
   private async agentPaymentChecks(mandate: MandateRecord, seller: string, units: bigint) {
@@ -663,6 +745,36 @@ export class StellarPaymentService {
     requireThat(spent + units <= BigInt(toBaseUnits(mandate.limit)), 403, "Payment exceeds the mandate's spending limit");
     requireThat(balance >= units, 409, "Insufficient account balance");
   }
+  /** Runs a step of an agent payment and keeps a record when the account's rules refuse it. */
+  private async orDecline<T>(mandate: MandateRecord, agent: AgentRecord, attempt: { seller: string; units: bigint; reference: string }, work: () => Promise<T>): Promise<T> {
+    try { return await work(); }
+    catch (error) {
+      if (error instanceof ServiceError && (error.status === 403 || error.status === 409) && !error.txHash) this.declined(mandate, agent, attempt, error.message);
+      throw error;
+    }
+  }
+  private declined(mandate: MandateRecord, agent: AgentRecord, attempt: { seller: string; units: bigint; reference: string }, reason: string): PaymentDecline {
+    const account = this.core.read().accounts.find(saved => saved.id === mandate.accountId)!;
+    return this.core.recordDecline({ ownerId: account.ownerId, accountId: account.id, agentId: agent.id, mandateReference: mandate.id, destination: attempt.seller, amount: decimal(attempt.units), currency: "USD", reason, reference: attempt.reference });
+  }
+  /**
+   * An agent that pays stores itself (x402) reports a payment its account
+   * refused. The reason is worked out here, not taken from the agent.
+   */
+  async reportDecline(agent: AgentRecord, body: Record<string, unknown>): Promise<PaymentDecline> {
+    const mandate = this.agentMandate(agent, body.mandate);
+    const seller = text(body.seller, "Seller address", 56);
+    requireThat(StrKey.isValidContract(seller) || StrKey.isValidEd25519PublicKey(seller), 400, "Enter a Stellar address");
+    const units = amount(body.amount);
+    let reference = text(body.reference, "Payment reference", 200);
+    if (body.url !== undefined) {
+      try { reference = `${reference} · x402 ${new URL(text(body.url, "Store URL", 500)).host}`; } catch { throw new ServiceError(400, "Enter the store URL the agent tried to buy from"); }
+    }
+    let reason = "The account's rules refused this payment on Stellar";
+    try { await this.agentPaymentChecks(mandate, seller, units); }
+    catch (error) { if (error instanceof ServiceError && error.status < 500) reason = error.message; else throw error; }
+    return this.declined(mandate, agent, { seller, units, reference }, reason);
+  }
   /** Builds the transfer for the agent to sign. Mandate submits it and pays the fee, but cannot sign it. */
   async prepareAgentPayment(agent: AgentRecord, body: Record<string, unknown>): Promise<PreparedAgentPayment> {
     const mandate = this.agentMandate(agent, body.mandate);
@@ -673,7 +785,7 @@ export class StellarPaymentService {
     const details = { mandate: mandate.id, seller, amount: decimal(units), reference };
     const saved = this.core.read().agentPayments?.find(payment => payment.id === paymentId);
     requireThat(!saved || JSON.stringify({ mandate: saved.mandateId, seller: saved.seller, amount: saved.amount, reference: saved.reference }) === JSON.stringify(details), 409, "Request ID was used with different details");
-    if (!this.chain.hasTransaction(paymentId)) await this.agentPaymentChecks(mandate, seller, units);
+    if (!this.chain.hasTransaction(paymentId)) await this.orDecline(mandate, agent, { seller, units, reference }, () => this.agentPaymentChecks(mandate, seller, units));
     const account = this.core.read().accounts.find(saved => saved.id === mandate.accountId)!;
     const prepared = await this.chain.preparePayment(paymentId, this.classicWallet(account), this.chain.wallet(account.id), seller, units, mandate.ruleId!, "USD");
     this.core.update(state => {
@@ -693,9 +805,10 @@ export class StellarPaymentService {
     const mandate = this.agentMandate(agent, pending.mandateId);
     const account = this.core.read().accounts.find(saved => saved.id === mandate.accountId)!;
     const units = BigInt(toBaseUnits(pending.amount));
-    if (!this.chain.hasTransaction(paymentId)) await this.agentPaymentChecks(mandate, pending.seller, units);
+    const attempt = { seller: pending.seller, units, reference: pending.reference };
+    if (!this.chain.hasTransaction(paymentId)) await this.orDecline(mandate, agent, attempt, () => this.agentPaymentChecks(mandate, pending.seller, units));
     const signed = text(body.authEntry, "Signed authorization", 20_000);
-    const receipt = await this.chain.submitPayment(paymentId, this.classicWallet(account), signed);
+    const receipt = await this.orDecline(mandate, agent, attempt, () => this.chain.submitPayment(paymentId, this.classicWallet(account), signed));
     const payment = this.record({ ownerId: account.ownerId, actorId: agent.id, accountId: account.id, source: this.chain.wallet(account.id).address, destination: pending.seller, kind: "payment", amount: pending.amount, currency: "USD", mandateId: mandate.id, agentId: agent.id, reference: pending.reference, requestId: paymentId }, receipt);
     return { status: "paid", payment };
   }
