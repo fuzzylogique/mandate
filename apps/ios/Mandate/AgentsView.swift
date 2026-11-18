@@ -394,7 +394,7 @@ struct AddAgentView: View {
                 Text("Agent name")
                     .font(.system(size: 14))
                     .foregroundStyle(Color.soft)
-                TextField("Like Claude or Grocery bot", text: $name)
+                TextField("Like Claude or Supplies agent", text: $name)
                     .focused($naming)
                     .submitLabel(.done)
                     .autocorrectionDisabled()

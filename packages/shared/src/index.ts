@@ -1,4 +1,5 @@
 export type * from "./payments.ts";
+export { WORKFLOW_CATEGORIES } from "./payments.ts";
 export type * from "./chat.ts";
 export * from "./agent.ts";
 

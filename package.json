@@ -1,6 +1,7 @@
 {
   "name": "mandate",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@12.18.0",
   "engines": {
@@ -12,9 +13,11 @@
     "dev:receipts": "pnpm --filter @mandate/receipts dev",
     "dev:merchant": "pnpm --filter @mandate/merchant dev",
     "dev:facilitator": "pnpm --filter @mandate/facilitator dev",
+    "tunnel": "cloudflared tunnel --url http://localhost:4022",
     "setup:payments": "node scripts/setup-payments.ts",
     "setup:contracts": "node scripts/deploy-contracts.ts",
     "setup:stores": "node scripts/setup-stores.ts",
+    "stage:demo": "node scripts/stage-demo.ts",
     "typecheck": "tsc -p . && pnpm -r typecheck",
     "test": "pnpm --filter @mandate/receipts test && pnpm --filter @mandate/langchain test && pnpm --filter @mandate/agent test",
     "pay:langchain": "pnpm --filter @mandate/langchain pay",

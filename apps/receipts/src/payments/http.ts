@@ -3,6 +3,7 @@ import { ServiceError } from "./store.ts";
 import type { StellarPaymentService } from "./stellar-service.ts";
 import { ChatError, createPaymentChats } from "@mandate/langchain/chat";
 import { AGENT_HEADERS } from "@mandate/shared";
+import { webOrigins } from "./origins.ts";
 
 function sessionToken(req: Request): string {
   const value = req.headers.cookie?.split(";").map(c => c.trim()).find(c => c.startsWith("mandate_session="));
@@ -23,7 +24,7 @@ export function createPaymentApp(service: StellarPaymentService) {
   app.use((req, res, next) => {
     res.setHeader("Cache-Control", "no-store");
     const origin = req.get("origin");
-    if (req.method !== "GET" && origin && origin !== (process.env.WEB_ORIGIN ?? "http://localhost:4020")) {
+    if (req.method !== "GET" && origin && !webOrigins().includes(origin)) {
       res.status(403).json({ error: "Request origin is not allowed" });
       return;
     }
@@ -65,6 +66,8 @@ export function createPaymentApp(service: StellarPaymentService) {
     res.clearCookie("mandate_session", { ...cookieOptions, maxAge: undefined }).status(204).end();
   });
   app.get("/api/workspace", async (req, res) => res.json(await service.workspace(actor(req))));
+  app.patch("/api/profile", (req, res) => res.json(service.updateProfile(actor(req), body(req))));
+  app.post("/api/workflows", async (req, res) => res.status(201).json(await service.createWorkflow(actor(req), body(req))));
   app.post("/api/agents", async (req, res) => res.status(201).json(await service.createAgent(actor(req), body(req))));
   app.post("/api/agents/:id/pairing", async (req, res) => res.json(await service.newPairingCode(actor(req), req.params.id as string)));
   app.delete("/api/agents/:id", async (req, res) => { await service.revokeAgent(actor(req), req.params.id as string); res.status(204).end(); });
@@ -76,11 +79,12 @@ export function createPaymentApp(service: StellarPaymentService) {
     const owner = actor(req);
     const method = input.method ?? "fiat";
     if (method !== "fiat" && method !== "testnet") throw new ServiceError(400, "Choose FIAT or Testnet funding");
-    res.status(201).json(method === "fiat" ? await service.createFiatCheckout(owner, req.params.id as string, input) : await service.fund(owner, req.params.id as string, input));
+    res.status(201).json(method === "fiat" ? await service.createFiatCheckout(owner, req.params.id as string, { ...input, returnOrigin: req.get("origin") }) : await service.fund(owner, req.params.id as string, input));
   });
   app.get("/api/funding/stripe/:sessionId", async (req, res) => res.json(await service.fiatFundingStatus(actor(req), req.params.sessionId as string)));
   app.post("/api/mandates", async (req, res) => res.status(201).json(await service.grantMandate(actor(req), body(req))));
   app.post("/api/mandates/:id/reveal", (req, res) => res.json(service.revealMandate(actor(req), req.params.id as string)));
+  app.patch("/api/mandates/:id", async (req, res) => res.json(await service.updateMandate(actor(req), req.params.id as string, body(req))));
   app.delete("/api/mandates/:id", async (req, res) => { await service.revoke(actor(req), req.params.id as string); res.status(204).end(); });
   app.post("/api/payments", async (req, res) => res.status(201).json(await service.pay(actor(req), body(req))));
   app.post("/api/pay/preview", paymentThrottle, async (req, res) => {
@@ -124,6 +128,7 @@ export function createPaymentApp(service: StellarPaymentService) {
   app.post("/api/agent/payments/prepare", agentThrottle, async (req, res) => res.json(await service.prepareAgentPayment(agent(req), body(req))));
   app.post("/api/agent/payments/submit", agentThrottle, async (req, res) => res.json(await service.submitAgentPayment(agent(req), body(req))));
   app.post("/api/agent/x402", agentThrottle, async (req, res) => res.json(await service.recordX402(agent(req), body(req))));
+  app.post("/api/agent/declines", agentThrottle, async (req, res) => res.status(201).json(await service.reportDecline(agent(req), body(req))));
   app.get("/api/network", (_req, res) => res.json({ mode: "stellar-testnet", network: service.network }));
   app.get("/api/health", (_req, res) => res.json({ ok: true, mode: "stellar-testnet" }));
   app.use((_req, res) => res.status(404).json({ error: "Route not found" }));

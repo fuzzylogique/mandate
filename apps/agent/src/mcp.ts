@@ -1,5 +1,5 @@
-// Mandate as an MCP server, so an assistant like Claude can buy for someone
-// within the limits they set. Runs locally over stdio and keeps the agent's key
+// Mandate as an MCP server, so an assistant like Claude can buy for a team
+// within the budget and vendors its owner set. Runs locally over stdio and keeps the agent's key
 // in ~/.mandate/agent.json (or MANDATE_AGENT_FILE). The key never leaves it.
 //
 //   claude mcp add mandate -- node <repo>/apps/agent/src/mcp.ts
@@ -25,7 +25,7 @@ server.registerTool("connect_to_mandate", {
   inputSchema: { code: z.string().describe("The code shown in Mandate, like K7Q4-92XD") },
 }, ({ code }) => guard(async () => {
   const connection = await agent.connect(code);
-  return `Connected as "${connection.name}" for ${connection.ownerName}. Check your mandates before buying.`;
+  return `Connected as "${connection.name}" for ${connection.ownerName}${connection.company ? ` at ${connection.company}` : ""}. Check your mandates before buying.`;
 }));
 
 server.registerTool("check_mandates", {
@@ -60,17 +60,17 @@ server.registerTool("pay_seller", {
 
 server.registerTool("find_products", {
   title: "Find products",
-  description: "Search the x402 stores for something to buy. Returns offers cheapest first, each with its store and whether it is a verified seller. Unverified stores are refused by the owner's account even if cheaper.",
-  inputSchema: { query: z.string().describe("What to look for, like 'basil' or 'olive oil'") },
+  description: "Search the vendors that sell over x402 for something to buy. Returns offers cheapest first, each with its vendor and whether it is a verified seller. Unverified vendors are refused by the owner's account even if cheaper.",
+  inputSchema: { query: z.string().describe("What to look for, like 'copy paper' or 'project tracker seat'") },
   annotations: { readOnlyHint: true },
 }, ({ query }) => guard(async () => describeProducts(await agent.products(query), query)));
 
 server.registerTool("buy", {
   title: "Buy over x402",
-  description: "Buy one product by its URL from find_products, paying the store over x402 from the owner's account, signed with your own key. The account checks your limit and the store on Stellar. Say in `reason` why you chose it.",
+  description: "Buy one product by its URL from find_products, paying the vendor over x402 from the owner's account, signed with your own key. The account checks your limit and the vendor on Stellar. If it is declined, the owner sees the attempt; do not retry another way. Say in `reason` why you chose it.",
   inputSchema: {
     url: z.string().url().describe("Product URL from find_products"),
-    reason: z.string().max(200).describe("One sentence on why this offer, like 'Cheapest verified store'"),
+    reason: z.string().max(200).describe("One sentence on what this is for, like 'Weekly paper restock, cheapest verified vendor'"),
     mandate,
   },
 }, ({ url, reason, mandate }) => guard(async () => describePayment(await agent.buy(url, { reference: reason, ...(mandate ? { mandate } : {}) }))));

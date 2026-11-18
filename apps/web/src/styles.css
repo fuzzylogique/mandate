@@ -1403,3 +1403,43 @@ a {
 .choice small { font-size: 13px; line-height: 1.4; }
 .agent-remove { justify-self: start; }
 .agents-actions { justify-content: flex-end; margin-bottom: 20px; }
+
+/* Purchasing workflows */
+.team-edit { padding: 2px 10px; font-size: 12px; margin-left: 6px; }
+.workflow-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(380px, 100%), 1fr)); gap: 20px; }
+.workflow-card { display: grid; gap: 18px; padding: 24px; align-content: start; }
+.workflow-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 14px; }
+.workflow-heading h2 { font-size: 20px; font-weight: 500; letter-spacing: -.02em; }
+.workflow-heading p { font-size: 12px; margin-top: 4px; }
+.workflow-heading .pill { flex: none; }
+.workflow-mandates { display: grid; gap: 14px; }
+.workflow-activity { font-size: 13px; }
+.workflow-empty { display: grid; gap: 12px; justify-items: center; padding: 44px 28px; }
+.workflow-empty h2 { color: var(--ink); font-size: 22px; font-weight: 500; }
+.workflow-empty p { max-width: 520px; }
+.workflow-starters { display: flex; flex-wrap: wrap; justify-content: center; gap: 8px; }
+.template-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 12px; }
+.template { display: grid; gap: 8px; align-content: start; justify-items: start; padding: 16px; border-radius: 18px; color: var(--ink); font: inherit; text-align: left; cursor: pointer; }
+.template:hover { background: var(--glass-hover); border-color: var(--glass-border-strong); }
+.template .muted { font-size: 13px; line-height: 1.4; }
+.brief { display: grid; gap: 10px; justify-items: start; margin-top: 8px; }
+.brief pre { width: 100%; padding: 12px 14px; border: 1px solid var(--glass-border); border-radius: 14px; background: var(--glass); color: var(--ink); font: 12px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap; overflow-wrap: anywhere; }
+.other-ways { display: grid; gap: 12px; }
+.other-ways summary { color: var(--ink-2); font-size: 13px; cursor: pointer; }
+.other-ways[open] summary { margin-bottom: 12px; }
+
+/* Spending */
+.spending { display: grid; gap: 22px; }
+.stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 20px; }
+.stat { display: grid; gap: 4px; padding: 22px; }
+.stat-value { font-size: 30px; font-variant-numeric: tabular-nums; letter-spacing: -.02em; }
+.breakdowns { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(340px, 100%), 1fr)); gap: 20px; }
+.list-title { padding: 20px 22px 0; font-size: 16px; font-weight: 500; }
+.breakdown { padding-bottom: 20px; }
+.bar-list { display: grid; gap: 16px; padding: 18px 22px 0; }
+.bar-label { display: flex; justify-content: space-between; gap: 12px; font-size: 14px; }
+.bar-label strong { font-variant-numeric: tabular-nums; font-weight: 500; }
+.bar { height: 6px; margin-top: 8px; border-radius: 99px; background: linear-gradient(90deg, var(--accent) var(--share), var(--track) var(--share)); }
+.ledger-symbol.is-refused { background: transparent; border: 1px solid var(--blocked-border); color: var(--blocked); }
+.ledger-amount.is-refused { color: var(--ink-2); text-decoration: line-through; }
+@media (max-width: 650px) { .workspace-tabs { justify-content: flex-start; overflow-x: auto; } .workspace-tabs a { flex: none; padding: 9px 11px; font-size: 13px; } .workflow-heading { flex-wrap: wrap; } }

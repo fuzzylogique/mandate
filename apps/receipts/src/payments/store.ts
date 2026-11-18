@@ -2,7 +2,7 @@ import { createHash, randomBytes, randomUUID, scrypt, timingSafeEqual } from "no
 import { DatabaseSync } from "node:sqlite";
 import { promisify } from "node:util";
 import { formatAmount, toBaseUnits } from "@mandate/shared";
-import type { AccountAgent, AccountMandate, Customer, PaymentEntry, PaymentWorkspace, SpendingAccount, SpendingPeriod } from "@mandate/shared";
+import type { AccountAgent, AccountMandate, Customer, PaymentDecline, PaymentEntry, PaymentWorkspace, PendingMandate, SpendingAccount, SpendingPeriod, Vendor } from "@mandate/shared";
 
 const deriveKey = promisify(scrypt);
 const hash = (value: string) => createHash("sha256").update(value).digest("hex");
@@ -32,27 +32,43 @@ export function amount(value: unknown): bigint {
   requireThat(units > 0n, 400, "Amount must be greater than zero");
   return units;
 }
-export interface CustomerRecord extends Customer { password: string; mainAccountId?: string; defaultChatMandateExpiresAt?: string }
+export interface CustomerRecord extends Customer {
+  password: string; mainAccountId?: string; defaultChatMandateExpiresAt?: string;
+  /** Set when this account chose to be listed as a vendor other teams can pick by name. */
+  vendor?: { name: string; category: string };
+}
+/** Optional text: absent or blank clears it. */
+export function optionalText(value: unknown, label: string, max = 80): string | undefined {
+  if (value === undefined || value === null || (typeof value === "string" && !value.trim())) return undefined;
+  return text(value, label, max);
+}
 /** An agent, plus its one-time connection code while it is waiting (stored only as a hash). */
-export interface AgentRecord extends Omit<AccountAgent, "pairing"> { pairingHash?: string; pairingExpiresAt?: string; pairingVersion?: number }
+export interface AgentRecord extends Omit<AccountAgent, "pairing" | "pending"> {
+  pairingHash?: string; pairingExpiresAt?: string; pairingVersion?: number;
+  /** Mandates drafted with a workflow, granted when the agent connects. */
+  pendingMandates?: (PendingMandate & { requestId: string })[];
+}
+export interface DeclineRecord extends PaymentDecline { ownerId: string }
 export interface MandateRecord extends Omit<AccountMandate, "reference" | "enforcement"> {
   id: string; mandateIdHash?: string;
   /** Service mandates are retained only as revoked historical records after upgrade. */
   enforcement?: "service" | "on-chain";
   rail?: "traditional" | "blockchain";
 }
-export function validateMandateInput(body: Record<string, unknown>): Pick<AccountMandate, "name" | "recipientType" | "recipient" | "limit" | "period" | "expiresAt" | "sellerIds"> {
+export function validateMandateInput(body: Record<string, unknown>): Pick<AccountMandate, "name" | "recipientType" | "recipient" | "limit" | "period" | "expiresAt" | "sellerIds" | "category"> {
   requireThat(body.recipientType === "person" || body.recipientType === "agent", 400, "Choose a person or agent");
   requireThat(body.period === "day" || body.period === "week" || body.period === "month", 400, "Choose a spending period");
   const expiry = typeof body.expiresAt === "string" ? Date.parse(body.expiresAt) : NaN;
   requireThat(Number.isFinite(expiry) && expiry > Date.now(), 400, "Expiry must be in the future");
   const sellerIds = body.sellerIds === undefined ? [] : body.sellerIds;
+  const category = optionalText(body.category, "Category", 40);
   requireThat(Array.isArray(sellerIds) && sellerIds.length <= 100 && sellerIds.every(id => Number.isSafeInteger(id) && id > 0), 400, "Seller IDs must be a list of up to 100 positive whole numbers");
   return {
     name: text(body.name, "Mandate name"), recipientType: body.recipientType,
     recipient: body.recipientType === "person" ? email(body.recipient) : body.recipient === undefined || body.recipient === "" ? "Any registered agent" : text(body.recipient, "Agent identifier"),
     limit: decimal(amount(body.limit)), period: body.period, expiresAt: new Date(expiry).toISOString(),
     ...(sellerIds.length ? { sellerIds: [...new Set<number>(sellerIds)].sort((a, b) => a - b) } : {}),
+    ...(category ? { category } : {}),
   };
 }
 export interface EntryRecord extends Omit<PaymentEntry, "mandateReference"> { mandateId: string | null; ownerId: string; actorId: string; requestId?: string }
@@ -69,6 +85,8 @@ export interface State {
   agents?: AgentRecord[];
   /** Payments an agent prepared with its own key, waiting for its signature. */
   agentPayments?: { id: string; agentId: string; mandateId: string; seller: string; amount: string; reference: string; createdAt: string }[];
+  /** Payments the account's rules refused. Kept so the owner can see what was tried. */
+  declines?: DeclineRecord[];
   nextSellerId?: number;
   stellarPairs: StellarAccountPair[];
   mandates: MandateRecord[];
@@ -87,7 +105,8 @@ export function mandateSpent(state: State, mandate: MandateRecord): bigint {
 }
 export type Actor = { kind: "customer"; id: string } | { kind: "mandate"; id: string; mandateReference: string };
 const emptyState = (): State => ({ schemaVersion: 1, customers: [], accounts: [], stellarPairs: [], mandates: [], entries: [], sessions: [] });
-const publicCustomer = ({ id, name, email }: CustomerRecord): Customer => ({ id, name, email });
+const publicCustomer = ({ id, name, email, company, team }: CustomerRecord): Customer => ({ id, name, email, ...(company ? { company } : {}), ...(team ? { team } : {}) });
+const MAX_DECLINES = 2000;
 export const publicEntry = ({ ownerId: _owner, actorId: _actor, requestId: _request, mandateId, ...entry }: EntryRecord): PaymentEntry => ({ ...entry, mandateReference: mandateId });
 
 /** Local authentication, workspace ownership and confirmed payment activity. */
@@ -151,10 +170,12 @@ export class WorkspaceStore {
     const address = email(body.email);
     requireThat(typeof body.password === "string" && body.password.length >= 12 && body.password.length <= 256, 400, "Use a password between 12 and 256 characters");
     const salt = randomBytes(16).toString("hex");
+    const company = optionalText(body.company, "Company");
+    const team = optionalText(body.team, "Team");
     const key = await deriveKey(body.password, salt, 64) as Buffer;
     return this.update(state => {
       requireThat(!state.customers.some(c => c.email === address), 409, "An account with this email already exists");
-      const customer: CustomerRecord = { id: `C_${randomUUID()}`, name, email: address, password: `${salt}:${key.toString("hex")}` };
+      const customer: CustomerRecord = { id: `C_${randomUUID()}`, name, email: address, password: `${salt}:${key.toString("hex")}`, ...(company ? { company } : {}), ...(team ? { team } : {}) };
       state.customers.push(customer);
       return this.issueSession(state, customer);
     });
@@ -181,6 +202,44 @@ export class WorkspaceStore {
     return { kind: "customer", id: session.customerId };
   }
   logout(token: string) { this.update(state => { state.sessions = state.sessions.filter(s => s.hash !== hash(token)); }); }
+  /** Company and team shown on the workspace, and whether this account is listed as a vendor. Only the fields sent change. */
+  updateProfile(actor: Actor, body: Record<string, unknown>): Customer {
+    return this.update(state => {
+      const customer = this.customer(state, actor);
+      const set = (key: "company" | "team", label: string) => {
+        if (!(key in body)) return;
+        const value = optionalText(body[key], label);
+        if (value) customer[key] = value; else delete customer[key];
+      };
+      set("company", "Company"); set("team", "Team");
+      if ("vendor" in body) {
+        if (body.vendor === null) delete customer.vendor;
+        else {
+          requireThat(body.vendor && typeof body.vendor === "object" && !Array.isArray(body.vendor), 400, "Vendor listing needs a name and a category");
+          const listing = body.vendor as Record<string, unknown>;
+          customer.vendor = { name: text(listing.name, "Vendor name", 80), category: text(listing.category, "Vendor category", 40) };
+        }
+      }
+      return publicCustomer(customer);
+    });
+  }
+  /** Listed vendors with a provisioned smart account, by name. */
+  vendors(state: State, exceptOwner?: string): Vendor[] {
+    return state.customers.filter(customer => customer.vendor && customer.id !== exceptOwner).flatMap(customer => {
+      const account = state.accounts.find(saved => saved.id === customer.mainAccountId && saved.ownerId === customer.id);
+      return account?.address && account.sellerId !== undefined ? [{ sellerId: account.sellerId, name: customer.vendor!.name, category: customer.vendor!.category, address: account.address }] : [];
+    }).sort((a, b) => a.name.localeCompare(b.name));
+  }
+  recordDecline(decline: Omit<DeclineRecord, "id" | "createdAt">): PaymentDecline {
+    return this.update(state => {
+      const declines = state.declines ??= [];
+      const record: DeclineRecord = { ...decline, id: `dec_${randomUUID()}`, createdAt: now() };
+      declines.push(record);
+      if (declines.length > MAX_DECLINES) declines.splice(0, declines.length - MAX_DECLINES);
+      const { ownerId: _owner, ...view } = record;
+      return view;
+    });
+  }
   mandateView(state: State, mandate: MandateRecord): AccountMandate {
     const { mandateIdHash: _secret, id, rail: _rail, enforcement, ...details } = mandate;
     const view: AccountMandate = { ...details, reference: id, ...(enforcement === "on-chain" ? { enforcement } : {}) };
@@ -203,9 +262,11 @@ export class WorkspaceStore {
     const sharedIds = new Set(shared.map(s => s.mandate.reference));
     return {
       mode: "stellar-testnet", customer: publicCustomer(customer), accounts,
-      agents: (state.agents ?? []).filter(agent => owned.has(agent.accountId)).map(({ pairingHash: _hash, pairingExpiresAt: _expires, pairingVersion: _version, ...agent }) => agent),
+      agents: (state.agents ?? []).filter(agent => owned.has(agent.accountId)).map(({ pairingHash: _hash, pairingExpiresAt: _expires, pairingVersion: _version, pendingMandates: _pending, ...agent }) => agent),
       mandates: state.mandates.filter(m => owned.has(m.accountId)).map(m => this.mandateView(state, m)), shared,
       activity: state.entries.filter(e => e.ownerId === customer.id || (e.mandateId && sharedIds.has(e.mandateId))).map(publicEntry).reverse(),
+      declines: (state.declines ?? []).filter(decline => decline.ownerId === customer.id).map(({ ownerId: _owner, ...decline }) => decline).reverse(),
+      vendors: this.vendors(state, customer.id),
     };
   }
   revoke(actor: Actor, id: string) {

@@ -9,6 +9,8 @@ export interface AgentConnection {
   agentId: string;
   name: string;
   ownerName: string;
+  /** The owner's company, if they set one. */
+  company?: string;
   /** The owner's smart account (C-address) the agent spends from. */
   smartAccount: string;
   /** Contract that checks the agent's signature and its registration. */
@@ -71,6 +73,15 @@ export interface AgentX402Report {
   txHash: string;
   url: string;
   reference: string;
+}
+
+/** Reporting an x402 purchase the account refused, so the owner sees the attempt. */
+export interface AgentDeclineReport {
+  mandate: string;
+  seller: string;
+  amount: string;
+  reference: string;
+  url?: string;
 }
 
 export type AgentPaymentOutcome = { status: "paid"; payment: PaymentEntry }

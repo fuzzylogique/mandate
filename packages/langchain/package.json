@@ -1,6 +1,7 @@
 {
   "name": "@mandate/langchain",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "exports": {
     ".": "./src/index.ts",

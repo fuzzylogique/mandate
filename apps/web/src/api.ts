@@ -1,4 +1,4 @@
-import type { AccountAgent, FiatCheckout, FiatFundingStatus, FundingMethod, MandateCreation, CreateAccountMandateInput, Customer, MandatePaymentInput, MandatePaymentPreview, MandatePaymentResult, PaymentChatState, PaymentEntry, PaymentNetwork, PaymentWorkspace, SpendingAccount } from "@mandate/shared";
+import type { AccountAgent, AccountMandate, CreateWorkflowInput, FiatCheckout, FiatFundingStatus, FundingMethod, MandateCreation, CreateAccountMandateInput, Customer, MandatePaymentInput, MandatePaymentPreview, MandatePaymentResult, PaymentChatState, PaymentEntry, PaymentNetwork, PaymentWorkspace, SpendingAccount } from "@mandate/shared";
 
 export class ApiError extends Error {
   constructor(public status: number, message: string) { super(message); }
@@ -23,7 +23,12 @@ export const api = {
   removeAgent: (id: string) => request<void>(`/agents/${encodeURIComponent(id)}`, "DELETE"),
   workspace: () => request<PaymentWorkspace>("/workspace"),
   network: () => request<{ mode: PaymentWorkspace["mode"]; network?: PaymentNetwork }>("/network"),
-  register: (input: { name: string; email: string; password: string }) => request<Customer>("/auth/register", "POST", input),
+  register: (input: { name: string; email: string; password: string; company?: string; team?: string }) => request<Customer>("/auth/register", "POST", input),
+  updateProfile: (input: { company?: string; team?: string }) => request<Customer>("/profile", "PATCH", input),
+  /** A new agent with its own key, plus the mandate it gets when it connects. */
+  createWorkflow: (input: CreateWorkflowInput) => request<AccountAgent>("/workflows", "POST", input),
+  /** Only the signed-in owner can change a limit; it is rewritten on Stellar. */
+  updateMandate: (reference: string, input: { limit?: string; category?: string | null; requestId: string }) => request<AccountMandate>(`/mandates/${encodeURIComponent(reference)}`, "PATCH", input),
   login: (input: { email: string; password: string }) => request<Customer>("/auth/login", "POST", input),
   logout: () => request<void>("/auth/logout", "POST"),
   fund: (id: string, amount: string, requestId: string, method: FundingMethod) => request<PaymentEntry | FiatCheckout>(`/accounts/${id}/funding`, "POST", { amount, requestId, method }),
