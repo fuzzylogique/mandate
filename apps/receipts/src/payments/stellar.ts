@@ -42,6 +42,8 @@ export function stellarConfig(env: NodeJS.ProcessEnv): StellarConfig {
 
 export interface ChainWallet { id: string; address: string; rail: "classic" | "blockchain"; paymentRuleId?: number }
 export interface ChainReceipt { txHash: string; result?: string }
+/** A mandate payment as the verified-seller policy reported it on chain. */
+export interface ChainPaymentEvent { txHash: string; account: string; seller: string; ruleId: number; token: string; amount: bigint; closedAt: string }
 export interface ChainGateway {
   network: PaymentNetwork;
   treasury(id: string): ChainWallet;
@@ -71,6 +73,12 @@ export interface ChainGateway {
   submitPayment(id: string, treasury: ChainWallet, signedAuthEntry: string): Promise<ChainReceipt>;
   /** Reads a confirmed token transfer, to record payments made elsewhere (x402). */
   readTransfer(txHash: string): Promise<{ token: string; from: string; to: string; amount: bigint; ledgerClosedAt?: string }>;
+  /**
+   * Payments the verified-seller policy authorized since `cursor`, oldest first.
+   * The policy emits one event per mandate payment, whoever submitted it.
+   * `more` means another page is waiting.
+   */
+  paymentEvents(cursor?: string): Promise<{ events: ChainPaymentEvent[]; cursor: string; more: boolean }>;
   usdToken(): string;
   hasTransaction(id: string): boolean;
   close(): void;
@@ -472,6 +480,30 @@ export class StellarGateway implements ChainGateway {
       from: Address.fromScVal(from!).toString(), to: Address.fromScVal(to!).toString(), amount: BigInt(scValToNative(amount!) as bigint),
       ledgerClosedAt: result.createdAt ? new Date(Number(result.createdAt) * 1000).toISOString() : undefined,
     };
+  }
+  async paymentEvents(cursor?: string): Promise<{ events: ChainPaymentEvent[]; cursor: string; more: boolean }> {
+    requireThat(this.config.verifiedSmartPolicy, 503, "Configure the verified-smart policy before reading payments from chain");
+    const limit = 200;
+    const filters: rpc.Api.EventFilter[] = [{ type: "contract", contractIds: [this.config.verifiedSmartPolicy] }];
+    let response: rpc.Api.GetEventsResponse | undefined;
+    // A cursor older than the RPC keeps is refused; start again from what it still has.
+    if (cursor) response = await this.server.getEvents({ filters, cursor, limit }).catch(() => undefined);
+    if (!response) {
+      const health = await this.server.getHealth();
+      // About a day of ledgers: enough to catch up after a restart.
+      response = await this.server.getEvents({ filters, startLedger: Math.max(health.oldestLedger, health.latestLedger - 17_280), limit });
+    }
+    const events: ChainPaymentEvent[] = [];
+    for (const event of response.events) {
+      // Current RPC versions only return events from successful calls and no longer send this flag.
+      if (event.inSuccessfulContractCall === false || event.topic.length !== 3) continue;
+      try {
+        if (scValToNative(event.topic[0]!) !== "payment_authorized") continue;
+        const data = scValToNative(event.value) as { context_rule_id: number; token: string; amount: bigint };
+        events.push({ txHash: event.txHash, account: Address.fromScVal(event.topic[1]!).toString(), seller: Address.fromScVal(event.topic[2]!).toString(), ruleId: Number(data.context_rule_id), token: String(data.token), amount: BigInt(data.amount), closedAt: event.ledgerClosedAt });
+      } catch { /* not a payment event in the shape this policy emits */ }
+    }
+    return { events, cursor: response.cursor, more: response.events.length === limit };
   }
   private async secureMandate(id: string, treasury: ChainWallet, account: ChainWallet, ruleId: number) {
     requireThat(this.network.agentVerification && this.config.agentVerifier, 503, "Run pnpm setup:contracts to configure on-chain agent verification");

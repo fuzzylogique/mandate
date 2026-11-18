@@ -4,7 +4,7 @@ import { agentSigningPayload, formatAmount, NETWORK, toBaseUnits } from "@mandat
 import type { AgentConnection, AgentMandate, AgentPaymentOutcome, AgentSellerCheck, PreparedAgentPayment } from "@mandate/shared";
 import type { AccountAgent, AccountMandate, AccountOpening, Customer, FiatCheckout, FiatFundingStatus, FundingMethod, MandateCreation, MandatePaymentPreview, PaymentDecline, PaymentEntry, PaymentWorkspace, SpendingAccount } from "@mandate/shared";
 import { WorkspaceStore, ServiceError, amount, requireThat, text, validateMandateInput, type Actor, type EntryRecord, type MandateRecord, type StellarAccountPair, type AgentRecord, publicEntry } from "./store.ts";
-import type { ChainGateway, ChainReceipt } from "./stellar.ts";
+import type { ChainGateway, ChainPaymentEvent, ChainReceipt } from "./stellar.ts";
 import { fundingAmount } from "./funding.ts";
 import { StripeSandbox, type FiatGateway, type StripeSession } from "./stripe.ts";
 
@@ -12,6 +12,8 @@ const digest = (value: string) => createHash("sha256").update(value).digest("hex
 const timestamp = () => new Date().toISOString();
 const decimal = (value: bigint) => formatAmount(value.toString());
 type ChatSetup = MandateCreation & { agent: AccountAgent };
+/** Recorded from a chain event, before (or without) the agent or service describing it. */
+const fromChain = (entry: EntryRecord) => entry.requestId?.startsWith("chain:") ?? false;
 const PAIRING_MINUTES = 30;
 /** "K7Q4-92XD": eight characters, no lookalikes (0/O, 1/I). */
 function pairingCode(): string {
@@ -30,6 +32,7 @@ export class StellarPaymentService {
   private chain: ChainGateway;
   private chatSetups = new Map<string, Promise<ChatSetup>>();
   private pendingGrants = new Map<string, Promise<void>>();
+  private readingChain = false;
   private stripe: FiatGateway;
   constructor(path: string, chain: ChainGateway, stripe: FiatGateway = new StripeSandbox()) {
     this.core = new WorkspaceStore(path);
@@ -88,16 +91,50 @@ export class StellarPaymentService {
     const { balances: _legacyBalances, ...details } = account as SpendingAccount & { balances?: unknown };
     return { ...details, sellerId: this.core.read().accounts.find(saved => saved.id === account.id)?.sellerId, currency: "USD", address: wallet.address, network: this.network.id, explorerUrl: `${this.network.explorerUrl}/contract/${wallet.address}` };
   }
-  private record(input: Omit<EntryRecord, "id" | "createdAt" | "settlement">, receipt: ChainReceipt): PaymentEntry {
+  private record(input: Omit<EntryRecord, "id" | "createdAt" | "settlement">, receipt: ChainReceipt, createdAt = timestamp()): PaymentEntry {
     const id = receipt.txHash;
     return this.core.update(state => {
       let entry = state.entries.find(e => e.id === id);
       if (!entry) {
-        entry = { ...input, id, createdAt: timestamp(), settlement: "stellar-testnet", txHash: receipt.txHash, explorerUrl: `${this.network.explorerUrl}/tx/${receipt.txHash}` };
+        entry = { ...input, id, createdAt, settlement: "stellar-testnet", txHash: receipt.txHash, explorerUrl: `${this.network.explorerUrl}/tx/${receipt.txHash}` };
         state.entries.push(entry);
+      } else if (fromChain(entry) && !input.requestId?.startsWith("chain:")) {
+        // The chain reader saw this payment first. Keep its time and take the details.
+        Object.assign(entry, input);
       }
       return publicEntry(entry);
     });
+  }
+  /**
+   * Reads mandate payments from chain events and records any that are missing,
+   * so a receipt never depends on the agent reporting its own purchase. An
+   * agent with its own key can pay a store directly over x402; the
+   * verified-seller policy still emits an event for it, and that is read here.
+   */
+  async syncChainPayments(): Promise<number> {
+    if (this.readingChain) return 0;
+    this.readingChain = true;
+    try {
+      let recorded = 0;
+      for (let page = 0; page < 25; page++) {
+        const { events, cursor, more } = await this.chain.paymentEvents(this.core.read().paymentEventCursor);
+        for (const event of events) if (this.recordChainPayment(event)) recorded++;
+        this.core.update(state => { state.paymentEventCursor = cursor; });
+        if (!more) break;
+      }
+      return recorded;
+    } finally { this.readingChain = false; }
+  }
+  private recordChainPayment(event: ChainPaymentEvent): boolean {
+    const state = this.core.read();
+    if (state.entries.some(entry => entry.id === event.txHash) || event.token !== this.chain.usdToken() || event.amount <= 0n) return false;
+    const account = state.accounts.find(saved => saved.address === event.account);
+    // Only mandates held by an agent with its own key can be paid without this service, which records its own payments as it makes them.
+    const mandate = account && state.mandates.find(saved => saved.accountId === account.id && saved.ruleId === event.ruleId && saved.agentId);
+    if (!account || !mandate?.agentId) return false;
+    const vendor = this.core.vendors(state).find(saved => saved.address === event.seller);
+    this.record({ ownerId: account.ownerId, actorId: mandate.agentId, accountId: account.id, source: event.account, destination: event.seller, kind: "payment", amount: decimal(event.amount), currency: "USD", mandateId: mandate.id, agentId: mandate.agentId, reference: `Purchase at ${vendor?.name ?? "a verified seller"} · read from Stellar`, requestId: `chain:${event.txHash}` }, { txHash: event.txHash }, new Date(event.closedAt).toISOString());
+    return true;
   }
   async workspace(actor: Actor): Promise<PaymentWorkspace> {
     await this.mainAccount(actor);
@@ -821,10 +858,9 @@ export class StellarPaymentService {
     try { host = new URL(url).host; } catch { throw new ServiceError(400, "Enter the store URL the agent bought from"); }
     const reference = text(body.reference, "Payment reference", 200);
     const existing = this.core.read().entries.find(entry => entry.id === txHash);
-    if (existing) {
-      requireThat(existing.agentId === agent.id, 409, "That payment is already recorded");
-      return { status: "paid", payment: publicEntry(existing) };
-    }
+    requireThat(!existing || existing.agentId === agent.id, 409, "That payment is already recorded");
+    // A receipt read from chain has no description yet; the agent's report adds one below.
+    if (existing && !fromChain(existing)) return { status: "paid", payment: publicEntry(existing) };
     const transfer = await this.chain.readTransfer(txHash);
     const account = this.core.read().accounts.find(saved => saved.id === mandate.accountId)!;
     requireThat(transfer.from === this.chain.wallet(account.id).address, 403, "That payment did not come from this mandate's account");
