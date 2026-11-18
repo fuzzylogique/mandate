@@ -1,0 +1,55 @@
+{
+  "about": "Recorded from https://soroban-testnet.stellar.org, unedited. Replayed by stellar.test.ts so the chain reader is tested against what the RPC really returns.",
+  "recordedAt": "2026-11-18T19:33:35Z",
+  "rpcVersion": "30.0.1-6b6ec60c8bde5a93984b6290065d3882d384b25d",
+  "policy": "CBR4M66YAZTBATCMGPOTYE2T5WAU6MKURKMOGF6VWSFCS757VPX6L2FZ",
+  "getHealth": {
+    "status": "healthy",
+    "latestLedger": 5801355,
+    "latestLedgerCloseTime": "1795030414",
+    "oldestLedger": 5680396,
+    "oldestLedgerCloseTime": "1794425623",
+    "ledgerRetentionWindow": 120960
+  },
+  "getEvents": {
+    "events": [
+      {
+        "type": "contract",
+        "ledger": 5799520,
+        "ledgerClosedAt": "2026-11-18T17:00:39Z",
+        "contractId": "CBR4M66YAZTBATCMGPOTYE2T5WAU6MKURKMOGF6VWSFCS757VPX6L2FZ",
+        "id": "0024908748732567552-0000000002",
+        "operationIndex": 0,
+        "transactionIndex": 17,
+        "txHash": "10532a2f934551836d42a2be16edf9c148fcd9cceb1d8dc3b2cecac199c09d4c",
+        "topic": [
+          "AAAADwAAABJwYXltZW50X2F1dGhvcml6ZWQAAA==",
+          "AAAAEgAAAAETmD9GBZjrBL7rAVz6s8e7BRGn8yjkSuD0EbQYqqeyDA==",
+          "AAAAEgAAAAGlssVp+K/+tTara1zqbfCemcRTYIfZEgZ+lXNFxceZ1g=="
+        ],
+        "value": "AAAAEQAAAAEAAAADAAAADwAAAAZhbW91bnQAAAAAAAoAAAAAAAAAAAAAAAAAmJaAAAAADwAAAA9jb250ZXh0X3J1bGVfaWQAAAAAAwAAAAMAAAAPAAAABXRva2VuAAAAAAAAEgAAAAEL3BpvfAt9kxImJhRzwgSEBYmvNBWz4LCTxBzWCiTgJg=="
+      },
+      {
+        "type": "contract",
+        "ledger": 5799521,
+        "ledgerClosedAt": "2026-11-18T17:00:44Z",
+        "contractId": "CBR4M66YAZTBATCMGPOTYE2T5WAU6MKURKMOGF6VWSFCS757VPX6L2FZ",
+        "id": "0024908753027538944-0000000002",
+        "operationIndex": 0,
+        "transactionIndex": 18,
+        "txHash": "3ead1926357a75b15cbf0278b137598f95db8f5b9f092749b0af7a523e29fb67",
+        "topic": [
+          "AAAADwAAABJwYXltZW50X2F1dGhvcml6ZWQAAA==",
+          "AAAAEgAAAAETmD9GBZjrBL7rAVz6s8e7BRGn8yjkSuD0EbQYqqeyDA==",
+          "AAAAEgAAAAGlssVp+K/+tTara1zqbfCemcRTYIfZEgZ+lXNFxceZ1g=="
+        ],
+        "value": "AAAAEQAAAAEAAAADAAAADwAAAAZhbW91bnQAAAAAAAoAAAAAAAAAAAAAAAAHJw4AAAAADwAAAA9jb250ZXh0X3J1bGVfaWQAAAAAAwAAAAMAAAAPAAAABXRva2VuAAAAAAAAEgAAAAEL3BpvfAt9kxImJhRzwgSEBYmvNBWz4LCTxBzWCiTgJg=="
+      }
+    ],
+    "cursor": "0024908753027538944-0000000002",
+    "latestLedger": 5801355,
+    "oldestLedger": 5680396,
+    "latestLedgerCloseTime": "1795030414",
+    "oldestLedgerCloseTime": "1794425623"
+  }
+}
