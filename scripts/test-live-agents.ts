@@ -85,6 +85,23 @@ try {
   console.log(`  paid: ${bought.status === "paid" && bought.payment.explorerUrl}`);
   assert.equal((await agent.mandates())[0]!.remaining, "27");
 
+  step("Pays Seatwise over x402 without telling Mandate ($15); the receipt is read from the chain");
+  const ruleId = (await agent.mandates())[0]!.ruleId;
+  const bypass = (secret: string) => createPayingFetch({ payer: { mode: "smart-account", agentSecret: secret, agentId: connection.agentId, smartAccount: connection.smartAccount, contextRuleId: ruleId, verifier: connection.agentVerifier }, extraAsset: connection.asset });
+  const ownKey = (agent as unknown as { data: { secret: string } }).data.secret;
+  const quiet = await bypass(ownKey)(url("seatwise", "design-seat"));
+  assert.equal(quiet.status, 200, "the store sold it");
+  let unreported: { reference: string; amount: string; agentId?: string; explorerUrl?: string } | undefined;
+  for (let i = 0; i < 30 && !unreported; i++) {
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    unreported = (await owner<{ activity: { kind: string; reference: string; amount: string; agentId?: string; explorerUrl?: string }[] }>("GET", "/api/workspace")).activity.find(entry => entry.kind === "payment" && entry.amount === "15");
+  }
+  assert.ok(unreported, "Mandate never recorded the unreported payment. Is the API reading payment events?");
+  assert.equal(unreported.agentId, waiting.id);
+  assert.match(unreported.reference, /read from Stellar/);
+  console.log(`  recorded "${unreported.reference}": ${unreported.explorerUrl}`);
+  assert.equal((await agent.mandates())[0]!.remaining, "12");
+
   step("Refused: Paperline Supply is verified but not allowed (service, then chain via x402)");
   declined(await agent.pay({ seller: values.STORE_PAPERLINE_ADDRESS!, amount: "1", reference: "Labels", requestId: randomUUID() }), "allowed seller");
   declined(await agent.buy(url("paperline", "labels")), "allowed seller");
@@ -97,15 +114,15 @@ try {
   declined(await agent.pay({ seller: values.STORE_SEATWISE_ADDRESS!, amount: "28", reference: "Too many seats", requestId: randomUUID() }), "limit");
   declined(await agent.buy(url("seatwise", "password-manager")), "limit");
 
-  step("Owner raises the limit to $60 a day on chain; the same purchase now goes through");
-  await owner("PATCH", `/api/mandates/${granted.mandate.reference}`, { limit: "60", requestId: randomUUID() });
-  assert.equal((await agent.mandates())[0]!.remaining, "47");
+  step("Owner raises the limit to $80 a day on chain; the same purchase now goes through");
+  await owner("PATCH", `/api/mandates/${granted.mandate.reference}`, { limit: "80", requestId: randomUUID() });
+  assert.equal((await agent.mandates())[0]!.remaining, "52");
   const afterRaise = await agent.buy(url("seatwise", "password-manager"), { reference: "Password manager renewal" });
   assert.equal(afterRaise.status, "paid", JSON.stringify(afterRaise));
   console.log(`  paid: ${afterRaise.status === "paid" && afterRaise.payment.explorerUrl}`);
 
-  step("Owner lowers the limit to $50 a day; nothing more fits");
-  await owner("PATCH", `/api/mandates/${granted.mandate.reference}`, { limit: "50", requestId: randomUUID() });
+  step("Owner lowers the limit to $70 a day; nothing more fits");
+  await owner("PATCH", `/api/mandates/${granted.mandate.reference}`, { limit: "70", requestId: randomUUID() });
   declined(await agent.buy(url("seatwise", "tracker-seat")), "limit");
 
   step("Refused: a different key cannot act as this agent");
@@ -115,8 +132,6 @@ try {
   await assert.rejects(stranger.mandates(), /not connected/);
   console.log("  rejected by Mandate");
   // Going around Mandate: sign the x402 payment as this agent with another key. The verifier checks the registry.
-  const ruleId = (await agent.mandates())[0]!.ruleId;
-  const bypass = (secret: string) => createPayingFetch({ payer: { mode: "smart-account", agentSecret: secret, agentId: connection.agentId, smartAccount: connection.smartAccount, contextRuleId: ruleId, verifier: connection.agentVerifier }, extraAsset: connection.asset });
   await assert.rejects(bypass(Keypair.random().secret())(url("seatwise", "tracker-seat")), /refused/);
   console.log("  rejected on chain");
 
@@ -125,18 +140,17 @@ try {
   await assert.rejects(agent.mandates(), /removed/);
   console.log("  rejected by Mandate");
   // Going around Mandate with the agent's real key and old rule: the rule and registration are gone on chain.
-  const ownKey = (agent as unknown as { data: { secret: string } }).data.secret;
   await assert.rejects(bypass(ownKey)(url("seatwise", "tracker-seat")), /refused/);
   console.log("  rejected on chain");
 
   workspace = await owner("GET", "/api/workspace");
   const activity = (workspace as unknown as { activity: { kind: string; agentId?: string; amount: string }[] }).activity.filter(e => e.kind === "payment");
-  assert.deepEqual(activity.map(e => e.amount).sort(), ["1", "12", "40"]);
+  assert.deepEqual(activity.map(e => e.amount).sort(), ["1", "12", "15", "40"]);
   assert.ok(activity.every(e => e.agentId === waiting.id));
   const declines = (workspace as unknown as { declines: { reason: string; agentId: string }[] }).declines;
   assert.equal(declines.length, 7, "every refused attempt is kept for the owner");
   assert.ok(declines.every(e => e.agentId === waiting.id));
-  console.log("\n✓ Agent with its own key: 3 payments made, 10 refused (6 of them by the account on chain, with Mandate skipped), limit raised and lowered on chain by the owner, revoked agent blocked on chain.");
+  console.log("\n✓ Agent with its own key: 4 payments made (one never reported, recorded from the chain), 10 refused (6 of them by the account on chain, with Mandate skipped), limit raised and lowered on chain by the owner, revoked agent blocked on chain.");
 } finally {
   for (const child of children) child.kill();
   rmSync(directory, { recursive: true, force: true });

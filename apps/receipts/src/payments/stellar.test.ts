@@ -8,7 +8,7 @@ import { Keypair, StrKey } from "@stellar/stellar-sdk";
 import type { PaymentNetwork, SpendingPeriod } from "@mandate/shared";
 import { agentSigningPayload } from "@mandate/shared";
 import { StellarPaymentService } from "./stellar-service.ts";
-import { StellarGateway, stellarConfig, type ChainGateway, type ChainWallet } from "./stellar.ts";
+import { StellarGateway, stellarConfig, type ChainGateway, type ChainPaymentEvent, type ChainWallet } from "./stellar.ts";
 import { ServiceError, WorkspaceStore } from "./store.ts";
 import { createPaymentApp } from "./http.ts";
 import Stripe from "stripe";
@@ -78,6 +78,9 @@ class TestChain implements ChainGateway {
     const receipt = this.receipt(); this.transactions.set(id, receipt); this.chainTransfers.set(receipt.txHash, { token: this.usdToken(), from: saved.source.address, to: saved.destination, amount: saved.amount }); return receipt;
   }
   chainTransfers = new Map<string, { token: string; from: string; to: string; amount: bigint }>();
+  chainEvents: ChainPaymentEvent[] = [];
+  /** The cursor is how many events have been read. */
+  async paymentEvents(cursor?: string) { const from = Number(cursor ?? 0); const events = this.chainEvents.slice(from, from + 2); return { events, cursor: String(from + events.length), more: from + events.length < this.chainEvents.length }; }
   async readTransfer(txHash: string) { const found = this.chainTransfers.get(txHash); if (!found) throw new ServiceError(404, "That transaction is not confirmed on Stellar testnet"); return found; }
   wallets = new Map<string, ChainWallet>();
   balances = new Map<string, bigint>();
@@ -1797,3 +1800,57 @@ async function connectedRecord(service: StellarPaymentService, id: string) {
   const state = (service as unknown as { core: WorkspaceStore }).core.read();
   return state.agents!.find(agent => agent.id === id)!;
 }
+
+test("a payment an agent never reports still gets a receipt, read from the chain", async () => {
+  const { service, owner, chain } = await fixture();
+  try {
+    const { agent } = await connectedAgent(service, owner);
+    const { mandate } = await service.grantMandate(owner, agentMandate(agent.id));
+    const seller = await sellerAccount(service);
+    const account = (await service.workspace(owner)).accounts[0]!;
+    const quiet = "ab".repeat(32); const closedAt = "2026-11-18T08:00:00Z";
+    const event = (txHash: string, extra: Partial<ChainPaymentEvent> = {}): ChainPaymentEvent => ({ txHash, account: account.address!, seller: seller.address!, ruleId: mandate.ruleId!, token: chain.usdToken(), amount: 15_000_000n, closedAt, ...extra });
+    chain.chainEvents.push(
+      event("01".repeat(32), { account: StrKey.encodeContract(randomBytes(32)) }), // someone else's account
+      event("02".repeat(32), { token: "CSOMEOTHERTOKEN" }),
+      event("03".repeat(32), { ruleId: 9999 }), // not a mandate held by an agent with its own key
+      event(quiet),
+    );
+    assert.equal(await service.syncChainPayments(), 1, "pages are followed to the end");
+    assert.equal(await service.syncChainPayments(), 0, "nothing is read twice");
+    let receipts = (await service.workspace(owner)).activity.filter(entry => entry.kind === "payment");
+    assert.equal(receipts.length, 1);
+    assert.deepEqual([receipts[0]!.id, receipts[0]!.amount, receipts[0]!.agentId, receipts[0]!.mandateReference, receipts[0]!.destination, receipts[0]!.createdAt], [quiet, "1.5", agent.id, mandate.reference, seller.address, new Date(closedAt).toISOString()]);
+    assert.match(receipts[0]!.reference, /read from Stellar/);
+    assert.equal((await service.workspace(owner)).mandates.find(saved => saved.reference === mandate.reference)!.agentId, agent.id);
+
+    // If the agent does report it later, its description replaces the placeholder. Still one receipt.
+    chain.chainTransfers.set(quiet, { token: chain.usdToken(), from: account.address!, to: seller.address!, amount: 15_000_000n });
+    const other = await connectedAgent(service, owner, "Another agent");
+    await assert.rejects(service.recordX402(other.agent, { mandate: (await service.grantMandate(owner, agentMandate(other.agent.id))).mandate.reference, txHash: quiet, url: "https://seatwise.example/design-seat", reference: "Not mine" }), { status: 409 });
+    const reported = await service.recordX402(agent, { mandate: mandate.reference, txHash: quiet, url: "https://seatwise.example/design-seat", reference: "Design seat for marketing" });
+    assert.equal(reported.status === "paid" && reported.payment.reference, "Design seat for marketing · x402 seatwise.example");
+    receipts = (await service.workspace(owner)).activity.filter(entry => entry.kind === "payment");
+    assert.equal(receipts.length, 1);
+    assert.equal(receipts[0]!.createdAt, new Date(closedAt).toISOString(), "the chain's time is kept");
+  } finally { service.close(); }
+});
+
+test("the chain reader leaves payments the service recorded itself alone, and its placeholder never overwrites a description", async () => {
+  const { service, owner, chain } = await fixture();
+  try {
+    const { agent, key } = await connectedAgent(service, owner);
+    const { mandate } = await service.grantMandate(owner, agentMandate(agent.id));
+    const seller = await sellerAccount(service);
+    const account = (await service.workspace(owner)).accounts[0]!;
+    await service.fund(owner, account.id, { amount: "10", requestId: "fund" });
+    const prepared = await service.prepareAgentPayment(agent, { mandate: mandate.reference, seller: seller.address, amount: "2", reference: "Labels", requestId: "labels" });
+    const outcome = await service.submitAgentPayment(agent, { paymentId: prepared.paymentId, authEntry: signEntry(key, agent.id, prepared.authEntry) });
+    assert.equal(outcome.status, "paid");
+    const txHash = outcome.status === "paid" ? outcome.payment.id : "";
+    chain.chainEvents.push({ txHash, account: account.address!, seller: seller.address!, ruleId: mandate.ruleId!, token: chain.usdToken(), amount: 20_000_000n, closedAt: "2026-11-18T08:00:00Z" });
+    assert.equal(await service.syncChainPayments(), 0);
+    const receipts = (await service.workspace(owner)).activity.filter(entry => entry.kind === "payment");
+    assert.deepEqual(receipts.map(entry => entry.reference), ["Labels"]);
+  } finally { service.close(); }
+});

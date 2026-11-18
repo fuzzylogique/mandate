@@ -7,7 +7,7 @@ A team at a mid-sized company sets up a **purchasing workflow** in a minute: wha
 - **Workflows**: pick a template, choose approved vendors by name, set a budget. You get a one-time code and ready-made instructions for the agent.
 - **One sign-in per agent**: each agent makes its own key, registered on chain. Nobody else can pay as it, including Mandate.
 - **No approval requests**: an agent cannot ask for more. Only the signed-in owner can change a budget, and the change is written to Stellar.
-- **Spending**: totals by workflow and vendor, every refused attempt with the reason, on-chain receipts and a CSV export.
+- **Spending**: totals by workflow and vendor, every refused attempt with the reason, receipts read from chain events and a CSV export.
 
 The dashboard shows the team's account and USD balance at the top, followed by **Workflows**, **Agents**, **Mandates** and **Spending**. Signup provisions a private Classic wallet and a verified Smart Account automatically. Choose **FIAT** or **Testnet** when adding funds.
 
@@ -180,7 +180,9 @@ An agent that holds its own key can pay only under the mandates you give it, and
 3. **Mandates → New mandate**, and choose the agent as **Mandate user**. Its key becomes the rule's **only signer**: there is no secret mandate ID, Mandate holds no key for it, and the Pay page and `/api/payments` refuse it. The seller ID list is resolved to addresses and written into the rule on chain, so every listed ID must already belong to a Mandate account.
 4. **The agent pays.** Each request to Mandate is signed with its key (`x-mandate-agent`, `x-mandate-time`, `x-mandate-signature` over method, path, time and body hash; signatures expire after 5 minutes).
    - **Direct payment** (`pay_seller`): Mandate checks the seller, limit, list, balance and expiry, then builds the transfer and returns the unsigned authorization. The agent decodes it and refuses to sign anything except `transfer(account, seller, amount)` on the USD token. It signs and returns it, and Mandate submits it and pays the network fee.
-   - **x402** (`find_products`, `buy`): the agent pays a vendor directly, signing the x402 payment itself, and the vendor's facilitator submits it. Mandate then records the purchase only after reading the confirmed transfer from chain: from this account, in USD, to a verified seller. If the account refuses the payment, the agent reports the attempt and Mandate works out the reason itself, so the owner sees it under **Spending**.
+   - **x402** (`find_products`, `buy`): the agent pays a vendor directly, signing the x402 payment itself, and the vendor's facilitator submits it. The agent then reports the purchase with a one-line reason, and Mandate records it only after reading the confirmed transfer from chain: from this account, in USD, to a verified seller. If the account refuses the payment, the agent reports the attempt and Mandate works out the reason itself, so the owner sees it under **Spending**.
+
+**Receipts come from the chain, not from the agent.** The verified-seller policy emits a `PaymentAuthorized` event for every mandate payment, whoever submitted it. The API reads those events every few seconds and records any payment it does not already have, so an agent that pays a store and never reports it still leaves a receipt. The agent's report only adds the description. Refusals never reach the chain, so those are still reported by the agent.
 
 Every payment is checked again by the owner's smart account on Stellar, whether or not it went through Mandate: the agent verifier (signature, plus the registered key for this agent), the spending-limit policy, and the verified-seller policy (verified C address, and the mandate's seller list if it has one). So an agent that skips Mandate, uses x402, or tries another key still cannot overspend, pay an unverified or unlisted seller, or pay after you remove it. `pnpm test:agents` proves each of these on testnet.
 

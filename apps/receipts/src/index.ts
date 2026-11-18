@@ -13,6 +13,10 @@ const service = new StellarPaymentService(path, gateway);
 const server = createPaymentApp(service).listen(port, host, () => {
   console.log(`Mandate API: http://localhost:${port}${host === "127.0.0.1" ? "" : ` (listening on ${host})`}`);
 });
+// Receipts come from the chain, not from agents: read payment events every few seconds.
+const readChain = () => { void service.syncChainPayments().catch(error => console.error("[payments] could not read payment events:", error instanceof Error ? error.message : error)); };
+const reader = service.network.mandates ? setInterval(readChain, Number(process.env.PAYMENTS_EVENT_POLL_MS ?? 8000)) : undefined;
+if (reader) readChain();
 for (const signal of ["SIGINT", "SIGTERM"] as const) {
-  process.once(signal, () => server.close(() => { service.close(); process.exit(0); }));
+  process.once(signal, () => { clearInterval(reader); server.close(() => { service.close(); process.exit(0); }); });
 }

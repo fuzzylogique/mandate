@@ -85,6 +85,8 @@ export interface State {
   agents?: AgentRecord[];
   /** Payments an agent prepared with its own key, waiting for its signature. */
   agentPayments?: { id: string; agentId: string; mandateId: string; seller: string; amount: string; reference: string; createdAt: string }[];
+  /** How far the chain has been read for payment events. */
+  paymentEventCursor?: string;
   /** Payments the account's rules refused. Kept so the owner can see what was tried. */
   declines?: DeclineRecord[];
   nextSellerId?: number;
