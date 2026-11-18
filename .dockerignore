@@ -14,3 +14,4 @@ contracts/target
 **/playwright-report
 .claude
 .DS_Store
+pitch

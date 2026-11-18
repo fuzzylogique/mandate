@@ -155,7 +155,9 @@ The same agent works three ways, all from [`apps/agent`](apps/agent):
 
 Set `MANDATE_API_URL` (default `http://localhost:4022`) and `MANDATE_AGENT_FILE` to change where the agent connects and keeps its key.
 
-**x402 demo.** `pnpm setup:stores` (with `pnpm dev` running) opens two store accounts in Mandate, FreshMart and GreenLeaf Market, so their smart accounts are verified sellers. It also picks an unregistered look-alike address (FreshMarrt) and funds a facilitator key. `pnpm dev` then also serves the stores on port 4021 (`/catalog` is free; each item is paid over x402 to the store's C address) and Mandate's facilitator on 4023. The facilitator is the stock x402 Stellar facilitator, with a higher fee ceiling and with events from the spending-limit policy, seller policy and agent verifier ignored. Hosted facilitators reject smart-account payments for those two reasons.
+**x402 demo.** `pnpm setup:stores` (with `pnpm dev` running) opens two seller accounts in Mandate, Atlas Data (a data API) and Forge Compute, so their smart accounts are verified sellers. It also picks an unregistered look-alike address (Atlass Data) and funds a facilitator key. `pnpm dev` then also serves the sellers on port 4021 (`/catalog` is free; each item is paid over x402 to the store's C address) and Mandate's facilitator on 4023. The facilitator is the stock x402 Stellar facilitator, with a higher fee ceiling and with events from the spending-limit policy, seller policy and agent verifier ignored. Hosted facilitators reject smart-account payments for those two reasons.
+
+**Pitch demo.** `pnpm stage:demo` (after `pnpm setup:stores`, with everything running) signs up a builder, Tobi Adeyemi, with $250 of testnet USD, a Research agent and a Coding agent that each hold their own key, a weekly mandate each (Atlas Data only, Forge Compute only), six x402 purchases and three attempts the account refuses. The login is a test value kept in `.env` as `DEMO_OWNER_PASSWORD`. Running it again reuses everything; pass `--again` to make more purchases.
 
 ## Stripe sandbox setup
 

@@ -68,34 +68,34 @@ try {
   assert.equal(connection.smartAccount, account.address);
   console.log(`  connected ${connection.agentId} with key ${agent.publicKey}`);
 
-  step("Owner grants $5 a day, FreshMart only");
-  const freshmart = await agent.checkSeller(values.STORE_FRESHMART_ADDRESS!);
-  assert.ok(freshmart.verified && freshmart.sellerId, "FreshMart must be a verified Mandate seller. Run pnpm setup:stores against this API.");
-  const granted = await owner<{ mandate: { reference: string }; mandateId?: string }>("POST", "/api/mandates", { name: "Groceries", agentId: waiting.id, limit: "5", period: "day", expiresAt: new Date(Date.now() + 7 * 86400_000).toISOString(), sellerIds: [freshmart.sellerId], requestId: randomUUID() });
+  step("Owner grants $5 a day, Atlas Data only");
+  const atlas = await agent.checkSeller(values.STORE_ATLAS_ADDRESS!);
+  assert.ok(atlas.verified && atlas.sellerId, "Atlas Data must be a verified Mandate seller. Run pnpm setup:stores against this API.");
+  const granted = await owner<{ mandate: { reference: string }; mandateId?: string }>("POST", "/api/mandates", { name: "Research data", agentId: waiting.id, limit: "5", period: "day", expiresAt: new Date(Date.now() + 7 * 86400_000).toISOString(), sellerIds: [atlas.sellerId], requestId: randomUUID() });
   assert.equal(granted.mandateId, undefined, "an agent-held mandate has no secret ID");
 
-  step("Pays FreshMart $1 directly, signed with its own key");
-  const direct = await agent.pay({ seller: values.STORE_FRESHMART_ADDRESS!, amount: "1", reference: "Delivery tip", requestId: randomUUID() });
+  step("Pays Atlas Data $1 directly, signed with its own key");
+  const direct = await agent.pay({ seller: values.STORE_ATLAS_ADDRESS!, amount: "1", reference: "Usage top-up", requestId: randomUUID() });
   assert.equal(direct.status, "paid", JSON.stringify(direct));
   console.log(`  paid: ${direct.status === "paid" && direct.payment.explorerUrl}`);
 
-  step("Buys herbs from FreshMart over x402 ($2.40)");
-  const bought = await agent.buy(url("freshmart", "herbs"), { reference: "Herbs" });
+  step("Buys a company lookup from Atlas Data over x402 ($2.40)");
+  const bought = await agent.buy(url("atlas", "lookup"), { reference: "Company lookup" });
   assert.equal(bought.status, "paid", JSON.stringify(bought));
   console.log(`  paid: ${bought.status === "paid" && bought.payment.explorerUrl}`);
   assert.equal((await agent.mandates())[0]!.remaining, "1.6");
 
-  step("Refused: GreenLeaf is verified but not allowed (service, then chain via x402)");
-  declined(await agent.pay({ seller: values.STORE_GREENLEAF_ADDRESS!, amount: "1", reference: "Herbs", requestId: randomUUID() }), "allowed seller");
-  declined(await agent.buy(url("greenleaf", "herbs")), "");
+  step("Refused: Forge Compute is verified but not allowed (service, then chain via x402)");
+  declined(await agent.pay({ seller: values.STORE_FORGE_ADDRESS!, amount: "1", reference: "GPU hour", requestId: randomUUID() }), "allowed seller");
+  declined(await agent.buy(url("forge", "gpu-hour")), "");
 
-  step("Refused: the look-alike store is not a verified seller");
-  declined(await agent.pay({ seller: values.STORE_LOOKALIKE_ADDRESS!, amount: "1", reference: "Herbs", requestId: randomUUID() }), "verified");
-  declined(await agent.buy(url("freshmarrt", "herbs")), "");
+  step("Refused: the look-alike seller is not verified");
+  declined(await agent.pay({ seller: values.STORE_LOOKALIKE_ADDRESS!, amount: "1", reference: "Company lookup", requestId: randomUUID() }), "verified");
+  declined(await agent.buy(url("atlass", "lookup")), "");
 
   step("Refused: over the limit");
-  declined(await agent.pay({ seller: values.STORE_FRESHMART_ADDRESS!, amount: "2", reference: "Basil", requestId: randomUUID() }), "limit");
-  declined(await agent.buy(url("freshmart", "basil")), "");
+  declined(await agent.pay({ seller: values.STORE_ATLAS_ADDRESS!, amount: "2", reference: "Web search", requestId: randomUUID() }), "limit");
+  declined(await agent.buy(url("atlas", "search")), "");
 
   step("Refused: a different key cannot act as this agent");
   const stranger = new MandateAgent({ file: join(directory, "stranger.json"), apiUrl: api });
@@ -106,7 +106,7 @@ try {
   // Going around Mandate: sign the x402 payment as this agent with another key. The verifier checks the registry.
   const ruleId = (await agent.mandates())[0]!.ruleId;
   const bypass = (secret: string) => createPayingFetch({ payer: { mode: "smart-account", agentSecret: secret, agentId: connection.agentId, smartAccount: connection.smartAccount, contextRuleId: ruleId, verifier: connection.agentVerifier }, extraAsset: connection.asset });
-  await assert.rejects(bypass(Keypair.random().secret())(url("freshmart", "basil").replace("basil", "herbs")), /refused/);
+  await assert.rejects(bypass(Keypair.random().secret())(url("atlas", "lookup")), /refused/);
   console.log("  rejected on chain");
 
   step("Owner removes the agent; it can no longer pay");
@@ -115,7 +115,7 @@ try {
   console.log("  rejected by Mandate");
   // Going around Mandate with the agent's real key and old rule: the rule and registration are gone on chain.
   const ownKey = (agent as unknown as { data: { secret: string } }).data.secret;
-  await assert.rejects(bypass(ownKey)(url("freshmart", "herbs")), /refused/);
+  await assert.rejects(bypass(ownKey)(url("atlas", "lookup")), /refused/);
   console.log("  rejected on chain");
 
   workspace = await owner("GET", "/api/workspace");

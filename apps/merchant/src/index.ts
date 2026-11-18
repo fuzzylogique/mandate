@@ -1,12 +1,13 @@
-// Demo stores: three shops that take payment over x402, so agents have
-// something to compare. They stand in for anywhere an agent might buy from.
+// Demo sellers: three services that take payment over x402, so agents have
+// something to compare. They stand in for the data, compute and API providers
+// a builder's agents buy from.
 // This is a fixture for the demo, not part of the product.
 //
 //   GET /catalog            free: every store and what it sells
 //   GET /<store>/<item>     paid: x402, settles to that store's own address
 //
-// FreshMart and GreenLeaf are Mandate accounts, so their smart accounts are
-// verified sellers (`pnpm setup:stores` creates them). FreshMarrt is a
+// Atlas Data and Forge Compute are Mandate accounts, so their smart accounts
+// are verified sellers (`pnpm setup:stores` creates them). Atlass Data is a
 // look-alike whose address is not verified, and it undercuts both on price.
 import express from "express";
 import { HTTPFacilitatorClient } from "@x402/core/server";
@@ -24,39 +25,39 @@ interface StoreConfig { slug: string; name: string; domain: string; payTo?: stri
 
 const stores: StoreConfig[] = [
   {
-    slug: "freshmart",
-    name: "FreshMart",
-    domain: "freshmart.example",
-    payTo: process.env.STORE_FRESHMART_ADDRESS,
+    slug: "atlas",
+    name: "Atlas Data",
+    domain: "atlasdata.example",
+    payTo: process.env.STORE_ATLAS_ADDRESS,
     items: [
-      { id: "herbs", title: "Fresh herbs bundle", price: "2.40" },
-      { id: "basil", title: "Basil, 4 bunches", price: "3.20" },
-      { id: "olive-oil", title: "Olive oil, 1 L", price: "9.50" },
-      { id: "mixer", title: "Commercial stand mixer", price: "120.00" },
+      { id: "lookup", title: "Company lookup, 100 records", price: "2.40" },
+      { id: "search", title: "Web search, 1,000 queries", price: "3.20" },
+      { id: "news", title: "News feed, 1 month", price: "9.50" },
+      { id: "export", title: "Full dataset export", price: "120.00" },
     ],
   },
   {
-    slug: "greenleaf",
-    name: "GreenLeaf Market",
-    domain: "greenleaf.example",
-    payTo: process.env.STORE_GREENLEAF_ADDRESS,
+    slug: "forge",
+    name: "Forge Compute",
+    domain: "forgecompute.example",
+    payTo: process.env.STORE_FORGE_ADDRESS,
     items: [
-      { id: "herbs", title: "Fresh herbs bundle", price: "2.10" },
-      { id: "basil", title: "Basil, 4 bunches", price: "3.60" },
-      { id: "olive-oil", title: "Olive oil, 1 L", price: "8.75" },
-      { id: "napkins", title: "Linen napkins, 12", price: "14.00" },
+      { id: "gpu-hour", title: "GPU hour", price: "2.10" },
+      { id: "transcribe", title: "Transcription, 60 minutes", price: "3.60" },
+      { id: "embeddings", title: "Embeddings, 10M tokens", price: "8.75" },
+      { id: "credits", title: "Model API credits", price: "14.00" },
     ],
   },
   {
-    slug: "freshmarrt",
-    name: "FreshMarrt",
-    domain: "freshmarrt.example",
+    slug: "atlass",
+    name: "Atlass Data",
+    domain: "atlassdata.example",
     payTo: process.env.STORE_LOOKALIKE_ADDRESS,
-    looksLike: "FreshMart",
+    looksLike: "Atlas Data",
     items: [
-      { id: "herbs", title: "Fresh herbs bundle", price: "1.20" },
-      { id: "basil", title: "Basil, 4 bunches", price: "1.50" },
-      { id: "olive-oil", title: "Olive oil, 1 L", price: "4.00" },
+      { id: "lookup", title: "Company lookup, 100 records", price: "1.20" },
+      { id: "search", title: "Web search, 1,000 queries", price: "1.50" },
+      { id: "news", title: "News feed, 1 month", price: "4.00" },
     ],
   },
 ];
@@ -114,7 +115,7 @@ app.use(paymentMiddleware(routes, resourceServer));
 for (const store of open) {
   for (const item of store.items) {
     app.get(`/${store.slug}/${item.id}`, (_req, res) => {
-      res.json({ order: "confirmed", store: store.name, item: item.title, price: item.price, delivery: "Tomorrow, 8 am" });
+      res.json({ order: "confirmed", store: store.name, item: item.title, price: item.price, delivery: "Added to your API key" });
     });
   }
 }

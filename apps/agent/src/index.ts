@@ -4,7 +4,7 @@
 //   pnpm agent mandates                               what it may spend
 //   pnpm agent seller C…                              is this a verified seller?
 //   pnpm agent pay C… 2.50 "Invoice 1042"             pay a seller directly
-//   pnpm agent find basil                             x402 products, cheapest first
+//   pnpm agent find gpu                               x402 products, cheapest first
 //   pnpm agent buy http://localhost:4021/…            buy one over x402
 //
 // The key lives in ~/.mandate/agent.json, or MANDATE_AGENT_FILE.

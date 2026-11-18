@@ -61,7 +61,7 @@ server.registerTool("pay_seller", {
 server.registerTool("find_products", {
   title: "Find products",
   description: "Search the x402 stores for something to buy. Returns offers cheapest first, each with its store and whether it is a verified seller. Unverified stores are refused by the owner's account even if cheaper.",
-  inputSchema: { query: z.string().describe("What to look for, like 'basil' or 'olive oil'") },
+  inputSchema: { query: z.string().describe("What to look for, like 'company lookup' or 'GPU hour'") },
   annotations: { readOnlyHint: true },
 }, ({ query }) => guard(async () => describeProducts(await agent.products(query), query)));
 

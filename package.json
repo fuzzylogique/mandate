@@ -16,6 +16,7 @@
     "setup:payments": "node scripts/setup-payments.ts",
     "setup:contracts": "node scripts/deploy-contracts.ts",
     "setup:stores": "node scripts/setup-stores.ts",
+    "stage:demo": "node scripts/stage-demo.ts",
     "typecheck": "tsc -p . && pnpm -r typecheck",
     "test": "pnpm --filter @mandate/receipts test && pnpm --filter @mandate/langchain test && pnpm --filter @mandate/agent test",
     "pay:langchain": "pnpm --filter @mandate/langchain pay",

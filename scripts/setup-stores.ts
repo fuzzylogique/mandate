@@ -1,4 +1,4 @@
-// Sets up the x402 demo: two stores that are real Mandate accounts (so their
+// Sets up the x402 demo: two sellers that are real Mandate accounts (so their
 // smart accounts are verified sellers), one look-alike that is not, and a
 // facilitator key that submits x402 payments and pays their fees.
 //
@@ -12,7 +12,7 @@ const values = readConfiguration();
 const api = process.env.PAYMENTS_API_URL || values.PAYMENTS_API_URL || "http://localhost:4022";
 
 async function storeAddress(slug: string, name: string): Promise<string> {
-  const setting = `STORE_${slug.toUpperCase()}_PASSWORD`;
+  const setting = `STORE_${slug.toUpperCase().replaceAll("-", "_")}_PASSWORD`;
   values[setting] ||= randomBytes(24).toString("base64url");
   const credentials = { name, email: `${slug}@stores.mandate.test`, password: values[setting]! };
   const post = (path: string) => fetch(`${api}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(credentials), signal: AbortSignal.timeout(180_000) });
@@ -28,9 +28,9 @@ async function storeAddress(slug: string, name: string): Promise<string> {
 
 const network = await (await fetch(`${api}/api/network`)).json() as { network: { tokenContract: string } };
 values.MERCHANT_ASSET = network.network.tokenContract;
-values.STORE_FRESHMART_ADDRESS = await storeAddress("freshmart", "FreshMart");
-values.STORE_GREENLEAF_ADDRESS = await storeAddress("greenleaf", "GreenLeaf Market");
-// A contract address nobody registered: it looks like a store but is not a verified seller.
+values.STORE_ATLAS_ADDRESS = await storeAddress("atlas-data", "Atlas Data");
+values.STORE_FORGE_ADDRESS = await storeAddress("forge-compute", "Forge Compute");
+// A contract address nobody registered: it looks like a seller but is not verified.
 values.STORE_LOOKALIKE_ADDRESS ||= StrKey.encodeContract(randomBytes(32));
 if (!values.FACILITATOR_SECRET) {
   values.FACILITATOR_SECRET = Keypair.random().secret();
@@ -42,5 +42,5 @@ if (!funded.ok) {
   if (!response.ok) throw new Error("Could not fund the facilitator on Stellar testnet");
 }
 writeConfiguration(values);
-console.log(`Stores ready: FreshMart ${values.STORE_FRESHMART_ADDRESS}, GreenLeaf ${values.STORE_GREENLEAF_ADDRESS}, look-alike ${values.STORE_LOOKALIKE_ADDRESS} (not verified).`);
+console.log(`Sellers ready: Atlas Data ${values.STORE_ATLAS_ADDRESS}, Forge Compute ${values.STORE_FORGE_ADDRESS}, look-alike ${values.STORE_LOOKALIKE_ADDRESS} (not verified).`);
 console.log("No secrets were printed. Restart pnpm dev so the stores and facilitator pick them up.");
