@@ -1,0 +1,264 @@
+diff --git a/typescript/.changeset/stellar-allowed-auth-event-contracts.md b/typescript/.changeset/stellar-allowed-auth-event-contracts.md
+new file mode 100644
+index 0000000..131f325
+--- /dev/null
++++ b/typescript/.changeset/stellar-allowed-auth-event-contracts.md
+@@ -0,0 +1,5 @@
++---
++"@x402/stellar": minor
++---
++
++The Stellar exact facilitator accepts an optional `allowedAuthEventContracts` list. Simulation events emitted by those contracts are skipped by the transfer event check, so a smart-account payer whose policies emit their own events in `__check_auth` can be verified. The list is empty by default and verification is unchanged without it. Events from the payment asset are always checked, and exactly one matching `transfer` is still required.
+diff --git a/typescript/packages/mechanisms/stellar/README.md b/typescript/packages/mechanisms/stellar/README.md
+index 72d3beb..0f3b220 100644
+--- a/typescript/packages/mechanisms/stellar/README.md
++++ b/typescript/packages/mechanisms/stellar/README.md
+@@ -124,6 +124,27 @@ const facilitator = new x402Facilitator().register(
+ );
+ ```
+ 
++### 3. Smart-Account Payers (Facilitator)
++
++A payer can be a contract account (C-address) whose `__check_auth` calls verifier and policy contracts. The facilitator defaults reject such a payment for two reasons:
++
++- **Fee ceiling.** The verifier and policies run on-chain, so the simulation-derived fee is a few hundred thousand stroops (about 300,000 to 500,000 in reported measurements), above the 50,000 default of `maxTransactionFeeStroops`. Verify returns `invalid_exact_stellar_payload_fee_exceeds_maximum`.
++- **Event check.** Verify requires the simulation to emit the asset's `transfer` event and no other contract event. A policy that emits its own event fails with `invalid_exact_stellar_payload_event_not_transfer`.
++
++To accept these payers, raise the ceiling and list the contracts whose events may be ignored:
++
++```typescript
++const facilitator = new x402Facilitator().register(
++  "stellar:testnet",
++  new ExactStellarScheme([signer], {
++    maxTransactionFeeStroops: 1_000_000,
++    allowedAuthEventContracts: [SPENDING_LIMIT_POLICY_ADDRESS, SIGNATURE_VERIFIER_ADDRESS],
++  }),
++);
++```
++
++`allowedAuthEventContracts` is empty by default, and verification is unchanged without it. Events emitted by a listed contract are skipped. Every other check still applies: the simulation must emit exactly one `transfer` from the asset with the expected sender, recipient and amount, and any event from an unlisted contract is rejected as before. Events from the payment asset are never skipped. List only contracts you have reviewed, and never a token contract, because its balance changes would go unchecked.
++
+ ## Development
+ 
+ ```bash
+diff --git a/typescript/packages/mechanisms/stellar/src/exact/facilitator/scheme.ts b/typescript/packages/mechanisms/stellar/src/exact/facilitator/scheme.ts
+index 412bce8..2c8bd09 100644
+--- a/typescript/packages/mechanisms/stellar/src/exact/facilitator/scheme.ts
++++ b/typescript/packages/mechanisms/stellar/src/exact/facilitator/scheme.ts
+@@ -20,6 +20,7 @@ import {
+   getNetworkPassphrase,
+   isStellarNetwork,
+   RpcConfig,
++  validateStellarAssetAddress,
+ } from "../../utils";
+ import type { FacilitatorStellarSigner } from "../../signer";
+ import type {
+@@ -92,6 +93,7 @@ export class ExactStellarScheme implements SchemeNetworkFacilitator {
+   public readonly maxTransactionFeeStroops: number;
+   public readonly inclusionFeeStroops: number;
+   public readonly feeBumpSigner?: FacilitatorStellarSigner;
++  public readonly allowedAuthEventContracts: ReadonlySet<string>;
+   private readonly signerMap: Map<string, FacilitatorStellarSigner>;
+   private readonly selectSigner: (addresses: readonly string[]) => string;
+   /**
+@@ -119,6 +121,9 @@ export class ExactStellarScheme implements SchemeNetworkFacilitator {
+    * @param options.feeBumpSigner - Optional signer used as fee source in a fee bump transaction wrapper.
+    *   When provided, settle() wraps the inner transaction (signed by the selected signer) in a
+    *   FeeBumpTransaction where the feeBumpSigner pays the fees, decoupling fee payment from sequence number management.
++   * @param options.allowedAuthEventContracts - Contract addresses (C...) whose simulation events verify ignores (default: none).
++   *   Lets a smart-account payer run policy or verifier contracts that emit their own events in `__check_auth`.
++   *   Events from the payment asset are always checked, so listing it has no effect. Never list a token contract.
+    * @returns ExactStellarScheme instance
+    */
+   constructor(
+@@ -130,6 +135,7 @@ export class ExactStellarScheme implements SchemeNetworkFacilitator {
+       inclusionFeeStroops = Number(BASE_FEE),
+       selectSigner = roundRobinSelectSigner(),
+       feeBumpSigner,
++      allowedAuthEventContracts = [],
+     }: {
+       /** Optional configuration with custom RPC and Horizon URLs */
+       rpcConfig?: RpcConfig;
+@@ -143,6 +149,8 @@ export class ExactStellarScheme implements SchemeNetworkFacilitator {
+       selectSigner?: (addresses: readonly string[]) => string;
+       /** Optional signer used as fee source in a fee bump transaction wrapper. Decouples fee payment from sequence number management. */
+       feeBumpSigner?: FacilitatorStellarSigner;
++      /** Contract addresses (C...) whose simulation events verify ignores, e.g. the policies of a smart-account payer (default: none) */
++      allowedAuthEventContracts?: string[];
+     } = {},
+   ) {
+     // Validate signers and store their data
+@@ -159,6 +167,12 @@ export class ExactStellarScheme implements SchemeNetworkFacilitator {
+     this.inclusionFeeStroops = inclusionFeeStroops ?? Number(BASE_FEE);
+     this.selectSigner = selectSigner ?? roundRobinSelectSigner();
+     this.feeBumpSigner = feeBumpSigner;
++    this.allowedAuthEventContracts = new Set(allowedAuthEventContracts ?? []);
++    for (const address of this.allowedAuthEventContracts) {
++      if (!validateStellarAssetAddress(address)) {
++        throw new Error(`allowedAuthEventContracts must be contract addresses (C...): ${address}`);
++      }
++    }
+     this.facilitatorSafetyAddresses = this.feeBumpSigner
+       ? new Set([...this.signingAddresses, this.feeBumpSigner.address])
+       : this.signingAddresses;
+@@ -636,7 +650,8 @@ export class ExactStellarScheme implements SchemeNetworkFacilitator {
+    * Validates simulation events for transfer correctness.
+    * Ensures there is exactly one token transfer event, the transfer matches the
+    * expected sender, recipient, amount, and asset (contract address), and the
+-   * facilitator address is not involved in the transfer.
++   * facilitator address is not involved in the transfer. Events emitted by a
++   * contract in `allowedAuthEventContracts` other than the asset are ignored.
+    *
+    * @param events - The array of DiagnosticEvent objects from the simulation
+    * @param fromAddress - The payer's address
+@@ -670,6 +685,21 @@ export class ExactStellarScheme implements SchemeNetworkFacilitator {
+           continue;
+         }
+ 
++        const contractIdHash = event.contractId;
++        const eventContractAddress = contractIdHash
++          ? Address.fromScAddress(xdr.ScAddress.scAddressTypeContract(contractIdHash)).toString()
++          : undefined;
++
++        // Skip events from operator-allowlisted contracts (e.g. smart-account policies).
++        // The asset's own events are always checked.
++        if (
++          eventContractAddress !== undefined &&
++          eventContractAddress !== expectedAsset &&
++          this.allowedAuthEventContracts.has(eventContractAddress)
++        ) {
++          continue;
++        }
++
+         const body = event.body.v0;
+         const topics = body.topics;
+ 
+@@ -697,15 +727,11 @@ export class ExactStellarScheme implements SchemeNetworkFacilitator {
+           );
+         }
+ 
+-        const contractIdHash = event.contractId;
+-        if (!contractIdHash)
++        if (eventContractAddress === undefined)
+           return invalidVerifyResponse(
+             "invalid_exact_stellar_payload_event_missing_contract_id",
+             fromAddress,
+           );
+-        const eventContractAddress = Address.fromScAddress(
+-          xdr.ScAddress.scAddressTypeContract(contractIdHash),
+-        ).toString();
+         if (eventContractAddress !== expectedAsset) {
+           return invalidVerifyResponse(
+             "invalid_exact_stellar_payload_event_wrong_asset",
+diff --git a/typescript/packages/mechanisms/stellar/test/unit/facilitator-verify.test.ts b/typescript/packages/mechanisms/stellar/test/unit/facilitator-verify.test.ts
+index 0f234a3..de3b466 100644
+--- a/typescript/packages/mechanisms/stellar/test/unit/facilitator-verify.test.ts
++++ b/typescript/packages/mechanisms/stellar/test/unit/facilitator-verify.test.ts
+@@ -13,6 +13,7 @@ import {
+   xdr,
+   Keypair,
+   Asset,
++  StrKey,
+ } from "@stellar/stellar-sdk";
+ import { Api } from "@stellar/stellar-sdk/rpc";
+ import { beforeEach, beforeAll, describe, expect, it, vi } from "vitest";
+@@ -1168,6 +1169,99 @@ describe("ExactStellarScheme#Verify (randomly using 1-2 facilitator signers)", (
+         const result = await facilitator.verify(validPayload, validRequirements);
+         expect(result.isValid).toBe(true);
+       });
++
++      describe("allowedAuthEventContracts", () => {
++        // Stand-ins for contracts a smart-account payer runs in `__check_auth`
++        const POLICY_CONTRACT = StrKey.encodeContract(Buffer.alloc(32, 1));
++        const OTHER_CONTRACT = StrKey.encodeContract(Buffer.alloc(32, 2));
++
++        const createMockPolicyEvent = (emitter: string) =>
++          createMockDiagnosticEvent(
++            new xdr.ContractEventV0({
++              topics: [
++                xdr.ScVal.scvSymbol("spending_limit_enforced"),
++                new Address(CLIENT_PUBLIC).toScVal(),
++              ],
++              data: xdr.ScVal.scvVoid(),
++            }),
++            xdr.ContractEventType.contract,
++            (new Address(emitter).toScAddress() as xdr.ScAddressContract).contractId,
++          );
++
++        const createMockTransferEvent = () =>
++          createMockContractEvent({
++            from: CLIENT_PUBLIC,
++            to: TRANSACTION_RECIPIENT,
++            amount: BigInt(10000),
++            contractId: expectedAssetHash(),
++          });
++
++        const mockSimulationEvents = (events: xdr.DiagnosticEvent[]) =>
++          vi.mocked(mockServer.simulateTransaction).mockResolvedValue({
++            id: "test",
++            latestLedger: 123,
++            events,
++            _parsed: true,
++            transactionData: new SorobanDataBuilder(),
++            minResourceFee: "100",
++            cost: { cpuInsns: "0", memBytes: "0" },
++            results: [],
++          } as Api.SimulateTransactionSuccessResponse);
++
++        const createFacilitatorAllowing = (allowedAuthEventContracts: string[]) =>
++          new ExactStellarScheme(facilitatorSigners, {
++            maxTransactionFeeStroops: 1_000_000,
++            allowedAuthEventContracts,
++          });
++
++        it("should accept events from an allowed contract and reject them by default", async () => {
++          mockSimulationEvents([
++            createMockPolicyEvent(POLICY_CONTRACT), // ❌ by default, skipped when allowed
++            createMockTransferEvent(),
++          ]);
++
++          let result = await facilitator.verify(validPayload, validRequirements);
++          expect(result.invalidReason).toBe("invalid_exact_stellar_payload_event_not_transfer");
++
++          const allowingFacilitator = createFacilitatorAllowing([POLICY_CONTRACT]);
++          result = await allowingFacilitator.verify(validPayload, validRequirements);
++          expect(result).toEqual(validVerifyResponse(CLIENT_PUBLIC));
++        });
++
++        it("should reject events from a contract that is not allowed", async () => {
++          mockSimulationEvents([
++            createMockPolicyEvent(OTHER_CONTRACT), // ❌ emitter is not in the allowlist
++            createMockTransferEvent(),
++          ]);
++
++          const allowingFacilitator = createFacilitatorAllowing([POLICY_CONTRACT]);
++          const result = await allowingFacilitator.verify(validPayload, validRequirements);
++          expect(result.invalidReason).toBe("invalid_exact_stellar_payload_event_not_transfer");
++        });
++
++        it("should still require the transfer event", async () => {
++          mockSimulationEvents([createMockPolicyEvent(POLICY_CONTRACT)]); // ❌ no transfer event
++
++          const allowingFacilitator = createFacilitatorAllowing([POLICY_CONTRACT]);
++          const result = await allowingFacilitator.verify(validPayload, validRequirements);
++          expect(result.invalidReason).toBe("invalid_exact_stellar_payload_no_transfer_events");
++        });
++
++        it("should keep checking the payment asset's events when it is listed", async () => {
++          // ❌ two transfers from the asset
++          mockSimulationEvents([createMockTransferEvent(), createMockTransferEvent()]);
++
++          const allowingFacilitator = createFacilitatorAllowing([ASSET]);
++          const result = await allowingFacilitator.verify(validPayload, validRequirements);
++          expect(result.invalidReason).toBe("invalid_exact_stellar_payload_multiple_transfers");
++        });
++
++        it("should reject an allowed contract that is not a contract address", () => {
++          expect(() => createFacilitatorAllowing([CLIENT_PUBLIC])).toThrow(
++            "allowedAuthEventContracts must be contract addresses (C...)",
++          );
++        });
++      });
+     });
+   });
+ 

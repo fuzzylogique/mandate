@@ -1,6 +1,7 @@
 # Hosted demo at https://mandate.fly.dev. One always-on machine runs the
-# dashboard (8080, with /api proxied to the API), the API, the facilitator and
-# the demo stores (public on :4021). Secrets are set with `fly secrets`.
+# dashboard (8080, with /api proxied to the API), the API, the demo vendors
+# (public on :4021) and the x402 facilitator (public on :4023, rate limited).
+# Secrets are set with `fly secrets`.
 app = "mandate"
 primary_region = "yyz"
 
@@ -15,6 +16,7 @@ primary_region = "yyz"
   MERCHANT_PORT = "4021"
   STORES_URL = "https://mandate.fly.dev:4021"
   FACILITATOR_PORT = "4023"
+  FACILITATOR_HOST = "0.0.0.0"
   FACILITATOR_URL = "http://127.0.0.1:4023"
 
 [mounts]
@@ -35,7 +37,7 @@ primary_region = "yyz"
     timeout = "5s"
     grace_period = "60s"
 
-# Demo stores, reached by agents over x402.
+# Demo vendors, reached by agents over x402.
 [[services]]
   internal_port = 4021
   protocol = "tcp"
@@ -45,6 +47,18 @@ primary_region = "yyz"
 
   [[services.ports]]
     port = 4021
+    handlers = ["tls", "http"]
+
+# The x402 facilitator for smart accounts with policies, open on testnet.
+[[services]]
+  internal_port = 4023
+  protocol = "tcp"
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [[services.ports]]
+    port = 4023
     handlers = ["tls", "http"]
 
 [[vm]]

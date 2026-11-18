@@ -1,4 +1,4 @@
-# One container for the hosted demo: dashboard, API, demo stores and facilitator.
+# One container for the hosted demo: dashboard, API, demo vendors and facilitator.
 # Deployed to Fly.io (see fly.toml); secrets come from `fly secrets`, never the image.
 FROM node:26-slim
 
@@ -19,5 +19,5 @@ COPY . .
 RUN pnpm --filter @mandate/web build
 
 ENV NODE_ENV=production
-EXPOSE 8080 4021
+EXPOSE 8080 4021 4023
 CMD ["bash", "scripts/fly-start.sh"]

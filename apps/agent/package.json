@@ -1,8 +1,9 @@
 {
   "name": "@mandate/agent",
   "private": true,
+  "license": "MIT",
   "type": "module",
-  "description": "An agent that holds its own key and pays within its owner's Mandate, over MCP, LangChain or the command line.",
+  "description": "A purchasing agent that holds its own key and pays within the budget and vendors its owner set in Mandate, over MCP, LangChain or the command line.",
   "scripts": {
     "start": "node --env-file-if-exists=../../.env src/index.ts",
     "mcp": "node src/mcp.ts",
